@@ -7,7 +7,7 @@ int main(int argc, char *argv[])
     SNES *snes = new SNES();
 
     snes->initsnem();
-    snes->loadrom((char *)"rom/ff6.sfc");
+    snes->loadrom((char *)"Sword World SFC (J).smc");
     while (1) {
         snes->execframe();
         if (key[KEY_ESC])
