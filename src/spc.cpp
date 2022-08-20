@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dsp.h"
-#include "snem.h"
+#include "snes.h"
 #include "spc.h"
 
 SPC::SPC(SNES *_snes)

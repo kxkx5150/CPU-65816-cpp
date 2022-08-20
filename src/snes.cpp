@@ -1,7 +1,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "../allegro.h"
-#include "snem.h"
+#include "snes.h"
+
 
 SNES::SNES()
 {
@@ -27,6 +28,13 @@ void oncesec()
 void hz60()
 {
 }
+volatile int close_button_pressed = FALSE;
+
+void close_button_handler(void)
+{
+    close_button_pressed = TRUE;
+}
+END_OF_FUNCTION(close_button_handler)
 void SNES::execframe()
 {
     nmi = vbl = 0;
@@ -65,6 +73,8 @@ void SNES::execframe()
             joyscan = 0;
         if (lines == 200 && key[KEY_ESC])
             break;
+        if (close_button_pressed)
+            exit(1);
     }
 }
 void SNES::initsnem()
@@ -76,6 +86,8 @@ void SNES::initsnem()
     install_keyboard();
     install_timer();
     install_int_ex(oncesec, MSEC_TO_TIMER(1000));
+    LOCK_FUNCTION(close_button_handler);
+    set_close_button_callback(close_button_handler);
     dsp->initdsp();
 }
 void SNES::resetsnem()

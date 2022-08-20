@@ -3,7 +3,7 @@
 #include "../allegro.h"
 #include "io.h"
 #include "ppu.h"
-#include "snem.h"
+#include "snes.h"
 #include "spc.h"
 #include "mem.h"
 

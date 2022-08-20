@@ -1,5 +1,5 @@
 #include "cpu.h"
-#include "snem.h"
+#include "snes.h"
 #include <cstdint>
 
 #define CALL_MEMBER_FN(object, ptrToMember) ((object).*(ptrToMember))

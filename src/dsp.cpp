@@ -1,6 +1,6 @@
 #include <cstdint>
 #include <stdlib.h>
-#include "snem.h"
+#include "snes.h"
 #include "spc.h"
 #include "dsp.h"
 

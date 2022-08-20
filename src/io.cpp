@@ -3,7 +3,7 @@
 #include "cpu.h"
 #include "mem.h"
 #include "ppu.h"
-#include "snem.h"
+#include "snes.h"
 #include "io.h"
 
 
