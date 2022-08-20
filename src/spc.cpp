@@ -1500,7 +1500,8 @@ void SPC::execspc()
             case 0xF7:
                 addr = readspc(pc) + p.p;
                 pc++;
-                addr2  = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
+                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
+
                 ya.b.a = readspc(addr2);
                 setspczn(ya.b.a);
                 spccount += 6;
@@ -1762,18 +1763,16 @@ void SPC::execspc()
                 }
                 spccount += 2;
                 break;
-            case 0x21:
-                // writespc(sp + 0x100, ya.b.a);
-                // sp--;
-                // spccount += 4;
-
-                // push(br[PC] >> 8);
-                // push(br[PC] & 0xff);
-                // int64_t padr = 0xffc0 + ((15 - (instr >> 4)) << 1);
-                // br[PC]       = mem->read(padr) | (mem->read(padr + 1) << 8);
-                // break;
+            // kxkx
+            case 84: {
+                addr = readspc(pc);
+                pc++;
+                addr2  = ((addr + x) & 0xff) | (p.p ? 0x100 : 0);
+                ya.b.a = readspc(addr2);
+                setspczn(ya.b.a);
+            } break;
             default:
-                printf("SPC - Bad opcode %02X at %04X\n", opcode, pc);
+                printf("SPC - Bad opcode %d at %04X\n", opcode, pc);
                 // pc--;
                 // exit(-1);
         }

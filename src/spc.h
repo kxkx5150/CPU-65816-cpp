@@ -48,10 +48,9 @@ class SPC {
   public:
     SPC(SNES *_snes);
 
-    uint8_t readfromspc(uint16_t addr);
-    void    writetospc(uint16_t addr, uint8_t val);
-    void    writespcregs(uint16_t a, uint8_t v);
-
+    uint8_t  readfromspc(uint16_t addr);
+    void     writetospc(uint16_t addr, uint8_t val);
+    void     writespcregs(uint16_t a, uint8_t v);
     uint16_t getspcpc();
     uint8_t  readspcregs(uint16_t a);
 
