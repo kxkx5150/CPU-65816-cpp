@@ -347,6 +347,10 @@ class CPU {
     void andZp8();
     void andZpx8();
     void andSp8();
+    void andSpII8();
+    void andSpII16();
+
+
     void andAbs8();
     void andAbsx8();
     void andAbsy8();

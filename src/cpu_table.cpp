@@ -155,8 +155,15 @@ void CPU::makeopcodetable()
     opcodes[0x25][1] = opcodes[0x25][3] = &CPU::andZp16;
     opcodes[0x35][0] = opcodes[0x35][2] = opcodes[0x35][4] = &CPU::andZpx8;
     opcodes[0x35][1] = opcodes[0x35][3] = &CPU::andZpx16;
+
     opcodes[0x23][0] = opcodes[0x23][2] = opcodes[0x23][4] = &CPU::andSp8;
     opcodes[0x23][1] = opcodes[0x23][3] = &CPU::andSp16;
+
+    // kxkx
+    // opcodes[0x33][0] = opcodes[0x33][2] = opcodes[0x23][4] = &CPU::andSpII8;
+    // opcodes[0x33][1] = opcodes[0x33][3] = &CPU::andSpII16;
+
+
     opcodes[0x2D][0] = opcodes[0x2D][2] = opcodes[0x2D][4] = &CPU::andAbs8;
     opcodes[0x2D][1] = opcodes[0x2D][3] = &CPU::andAbs16;
     opcodes[0x3D][0] = opcodes[0x3D][2] = opcodes[0x3D][4] = &CPU::andAbsx8;
@@ -169,8 +176,10 @@ void CPU::makeopcodetable()
     opcodes[0x3F][1] = opcodes[0x3F][3] = &CPU::andLongx16;
     opcodes[0x32][0] = opcodes[0x32][2] = opcodes[0x32][4] = &CPU::andIndirect8;
     opcodes[0x32][1] = opcodes[0x32][3] = &CPU::andIndirect16;
+
     opcodes[0x21][0] = opcodes[0x21][2] = opcodes[0x21][4] = &CPU::andIndirectx8;
     opcodes[0x21][1] = opcodes[0x21][3] = &CPU::andIndirectx16;
+
     opcodes[0x31][0] = opcodes[0x31][2] = opcodes[0x31][4] = &CPU::andIndirecty8;
     opcodes[0x31][1] = opcodes[0x31][3] = &CPU::andIndirecty16;
     opcodes[0x27][0] = opcodes[0x27][2] = opcodes[0x27][4] = &CPU::andIndirectLong8;

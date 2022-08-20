@@ -2138,6 +2138,18 @@ void CPU::andSp8()
     a.b.l &= snes->readmem(addr);
     setzn8(a.b.l);
 }
+
+// kxkx
+void CPU::andSpII8()
+{
+    addr = stack();
+}
+void CPU::andSpII16()
+{
+    addr = stack();
+}
+//
+
 void CPU::andAbs8()
 {
     addr = absolute();
