@@ -1,1816 +1,1484 @@
-#include <cstdint>
+
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "dsp.h"
-#include "snes.h"
+#include <stdint.h>
+#include <stdbool.h>
 #include "spc.h"
+#include "apu.h"
 
-SPC::SPC(SNES *_snes)
+SPC::SPC(Apu *_apu)
 {
-    snes = _snes;
+    apu = _apu;
 }
-void SPC::getdp(uint16_t *addr)
+uint8_t SPC::spc_read(uint16_t adr)
 {
-    *addr = readspc(pc) | p.p;
-    pc++;
+    return apu->apu_cpuRead(adr);
 }
-void SPC::getdpx(uint16_t *addr)
+void SPC::spc_write(uint16_t adr, uint8_t val)
 {
-    *addr = ((readspc(pc) + x) & 0xFF) | p.p;
-    pc++;
+    apu->apu_cpuWrite(adr, val);
 }
-void SPC::getdpy(uint16_t *addr)
+void SPC::spc_reset()
 {
-    *addr = ((readspc(pc) + ya.b.y) & 0xFF) | p.p;
-    pc++;
+    a  = 0;
+    x  = 0;
+    y  = 0;
+    sp = 0;
+    pc = spc_read(0xfffe) | (spc_read(0xffff) << 8);
+
+    c = false;
+    z = false;
+    v = false;
+    n = false;
+    i = false;
+    h = false;
+    p = false;
+    b = false;
+
+    stopped    = false;
+    cyclesUsed = 0;
 }
-void SPC::getabs(uint16_t *addr)
+int SPC::spc_runOpcode()
 {
-    *addr = readspc(pc) | (readspc(pc + 1) << 8);
-    pc += 2;
+    cyclesUsed = 0;
+    if (stopped)
+        return 1;
+    uint8_t opcode = spc_readOpcode();
+    cyclesUsed     = cyclesPerOpcode[opcode];
+    spc_doOpcode(opcode);
+    return cyclesUsed;
 }
-void SPC::setspczn(uint8_t v)
+uint8_t SPC::spc_readOpcode()
 {
-    p.z = !(v);
-    p.n = (v)&0x80;
+    return spc_read(pc++);
 }
-void SPC::setspczn16(uint16_t v)
+uint16_t SPC::spc_readOpcodeWord()
 {
-    p.z = !(v);
-    p.n = (v)&0x8000;
+    uint8_t low = spc_readOpcode();
+    return low | (spc_readOpcode() << 8);
 }
-uint8_t SPC::readspc(uint16_t a)
+uint8_t SPC::spc_getFlags()
 {
-    return (((a)&0xFFC0) == 0xFFC0) ? spcreadhigh[(a)&63] : ((((a)&0xFFF0) == 0xF0) ? readspcregs(a) : spcram[a]);
+    uint8_t val = n << 7;
+    val |= v << 6;
+    val |= p << 5;
+    val |= b << 4;
+    val |= h << 3;
+    val |= i << 2;
+    val |= z << 1;
+    val |= c;
+    return val;
 }
-void SPC::writespc(uint16_t a, uint8_t v)
+void SPC::spc_setFlags(uint8_t val)
 {
-    if (((a)&0xFFF0) == 0xF0)
-        writespcregs(a, v);
-    else
-        spcram[a] = v;
+    n = val & 0x80;
+    v = val & 0x40;
+    p = val & 0x20;
+    b = val & 0x10;
+    h = val & 8;
+    i = val & 4;
+    z = val & 2;
+    c = val & 1;
 }
-void SPC::ADC(uint8_t *ac, uint8_t temp, uint16_t *tempw)
+void SPC::spc_setZN(uint8_t value)
 {
-    *tempw = *ac + temp + ((p.c) ? 1 : 0);
-    p.v    = (!((*ac ^ temp) & 0x80) && ((*ac ^ *tempw) & 0x80));
-    *ac    = *tempw & 0xFF;
-    setspczn(*ac);
-    p.c = *tempw & 0x100;
+    z = value == 0;
+    n = value & 0x80;
 }
-void SPC::SBC(uint8_t *ac, uint8_t temp, uint16_t *tempw)
+void SPC::spc_doBranch(uint8_t value, bool check)
 {
-    *tempw = *ac - temp - ((p.c) ? 0 : 1);
-    p.v    = (((*ac ^ temp) & 0x80) && ((*ac ^ *tempw) & 0x80));
-    *ac    = *tempw & 0xFF;
-    setspczn(*ac);
-    p.c = *tempw <= 0xFF;
-}
-uint8_t SPC::readfromspc(uint16_t addr)
-{
-    return spctocpu[addr & 3];
-}
-void SPC::writetospc(uint16_t addr, uint8_t val)
-{
-    spcram[(addr & 3) + 0xF4] = val;
-}
-void SPC::writespcregs(uint16_t a, uint8_t v)
-{
-    switch (a) {
-        case 0xF1:
-            if (v & 0x10)
-                spcram[0xF4] = spcram[0xF5] = 0;
-            if (v & 0x20)
-                spcram[0xF6] = spcram[0xF7] = 0;
-            spcram[0xF1] = v;
-            if (v & 0x80)
-                spcreadhigh = spcrom;
-            else
-                spcreadhigh = spcram + 0xFFC0;
-            break;
-        case 0xF2:
-        case 0xF3:
-            snes->dsp->writedsp(a, v);
-            break;
-        case 0xF4:
-        case 0xF5:
-        case 0xF6:
-        case 0xF7:
-            spctocpu[a & 3] = v;
-            break;
-        case 0xFA:
-        case 0xFB:
-        case 0xFC:
-            spclimit[a - 0xFA] = v;
-            break;
-        case 0xFD:
-        case 0xFE:
-        case 0xFF:
-            spcram[a] = v;
-            break;
+    if (check) {
+        cyclesUsed += 2;
+        pc += (int8_t)value;
     }
 }
-uint16_t SPC::getspcpc()
+uint8_t SPC::spc_pullByte()
 {
-    return pc;
+    sp++;
+    return spc_read(0x100 | sp);
 }
-uint8_t SPC::readspcregs(uint16_t a)
+void SPC::spc_pushByte(uint8_t value)
 {
-    uint8_t v;
-    switch (a) {
-        case 0xF2:
-        case 0xF3:
-            return snes->dsp->readdsp(a);
-        case 0xFD:
-        case 0xFE:
-        case 0xFF:
-            v         = spcram[a];
-            spcram[a] = 0;
-            return v;
-    }
-    return spcram[a];
+    spc_write(0x100 | sp, value);
+    sp--;
 }
-void SPC::initspc()
+uint16_t SPC::spc_pullWord()
 {
-    spcram = (uint8_t *)malloc(65536);
-    memset(spcram, 0, 65536);
+    uint8_t value = spc_pullByte();
+    return value | (spc_pullByte() << 8);
 }
-void SPC::resetspc()
+void SPC::spc_pushWord(uint16_t value)
 {
-    pc          = 0xFFC0;
-    spcreadhigh = spcrom;
-    x = ya.w    = 0;
-    spccycles   = 0;
-    p.p         = 0;
-    spctimer[0] = spctimer[1] = spctimer[2] = 0;
-    spctimer2[0] = spctimer2[1] = spctimer2[2] = 0;
-    spcram[0xF1]                               = 0x80;
+    spc_pushByte(value >> 8);
+    spc_pushByte(value & 0xff);
 }
-void SPC::execspc()
+uint16_t SPC::spc_readWord(uint16_t adrl, uint16_t adrh)
 {
-    uint8_t  opcode, temp, temp2;
-    uint16_t addr, addr2, tempw;
-    uint32_t templ;
-    int      spccount;
-    while (spccycles > 0) {
-        spc3     = spc2;
-        spc2     = pc;
-        spccount = 0;
-        opcode   = readspc(pc);
-        pc++;
-        switch (opcode) {
-            case 0x00:
-                spccount += 2;
-                break;
-            case 0x02:
-                getdp(&addr);
-                temp = readspc(addr) | 0x01;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x22:
-                getdp(&addr);
-                temp = readspc(addr) | 0x02;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x42:
-                getdp(&addr);
-                temp = readspc(addr) | 0x04;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x62:
-                getdp(&addr);
-                temp = readspc(addr) | 0x08;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x82:
-                getdp(&addr);
-                temp = readspc(addr) | 0x10;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xA2:
-                getdp(&addr);
-                temp = readspc(addr) | 0x20;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xC2:
-                getdp(&addr);
-                temp = readspc(addr) | 0x40;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xE2:
-                getdp(&addr);
-                temp = readspc(addr) | 0x80;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x12:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x01;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x32:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x02;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x52:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x04;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x72:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x08;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x92:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x10;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xB2:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x20;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xD2:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x40;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xF2:
-                getdp(&addr);
-                temp = readspc(addr) & ~0x80;
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x04:
-                getdp(&addr);
-                ya.b.a |= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0x05:
-                getabs(&addr);
-                ya.b.a |= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 4;
-                break;
-            case 0x06:
-                addr = x + p.p;
-                ya.b.a |= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0x07:
-                getdpx(&addr);
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8);
-                ya.b.a |= readspc(addr2);
-                setspczn(ya.b.a);
-                spccount += 6;
-                break;
-            case 0x08:
-                ya.b.a |= readspc(pc);
-                pc++;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x09:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(pc) + p.p;
-                pc++;
-                temp = readspc(addr) | readspc(addr2);
-                setspczn(temp);
-                writespc(addr2, temp);
-                spccount += 6;
-                break;
-            case 0x0B:
-                getdp(&addr);
-                temp = readspc(addr);
-                p.c  = temp & 0x80;
-                temp <<= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x0C:
-                getabs(&addr);
-                temp = readspc(addr);
-                p.c  = temp & 0x80;
-                temp <<= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x0D:
-                temp = (p.c) ? 1 : 0;
-                if (p.z)
-                    temp |= 0x02;
-                if (p.i)
-                    temp |= 0x04;
-                if (p.h)
-                    temp |= 0x08;
-                if (p.b)
-                    temp |= 0x10;
-                if (p.p)
-                    temp |= 0x20;
-                if (p.v)
-                    temp |= 0x40;
-                if (p.n)
-                    temp |= 0x80;
-                writespc(sp + 0x100, temp);
-                sp--;
-                spccount += 4;
-                break;
-            case 0x0E:
-                getabs(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.a & temp);
-                temp |= ya.b.a;
-                writespc(addr, temp);
-                spccount += 6;
-                break;
-            case 0x10:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!p.n) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0x14:
-                getdpx(&addr);
-                ya.b.a |= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 4;
-                break;
-            case 0x15:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                ya.b.a |= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0x16:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                ya.b.a |= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0x17:
-                getdp(&addr);
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
-                ya.b.a |= readspc(addr2);
-                setspczn(ya.b.a);
-                spccount += 6;
-                break;
-            case 0x18:
-                temp2 = readspc(pc);
-                pc++;
-                getdp(&addr);
-                temp2 |= readspc(addr);
-                setspczn(temp2);
-                writespc(addr, temp2);
-                spccount += 5;
-                break;
-            case 0x1A:
-                getdp(&addr);
-                tempw = (readspc(addr) + (readspc(addr + 1) << 8)) - 1;
-                writespc(addr, tempw & 0xFF);
-                writespc(addr + 1, tempw >> 8);
-                p.z = !tempw;
-                p.n = tempw & 0x8000;
-                spccount += 6;
-                break;
-            case 0x1B:
-                getdpx(&addr);
-                temp = readspc(addr);
-                p.c  = temp & 0x80;
-                temp <<= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x1C:
-                p.c = ya.b.a & 0x80;
-                ya.b.a <<= 1;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x1D:
-                x--;
-                setspczn(x);
-                spccount += 2;
-                break;
-            case 0x1E:
-                getabs(&addr);
-                temp = readspc(addr);
-                setspczn(x - temp);
-                p.c = (x >= temp);
-                spccount += 4;
-                break;
-            case 0x1F:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                pc = readspc(addr) | (readspc(addr + 1) << 8);
-                spccount += 6;
-                break;
-            case 0x20:
-                p.p = 0;
-                spccount += 2;
-                break;
-            case 0x24:
-                getdp(&addr);
-                ya.b.a &= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0x25:
-                getabs(&addr);
-                ya.b.a &= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 4;
-                break;
-            case 0x26:
-                addr = x + p.p;
-                ya.b.a &= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0x27:
-                getdpx(&addr);
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8);
-                ya.b.a &= readspc(addr2);
-                setspczn(ya.b.a);
-                spccount += 6;
-                break;
-            case 0x28:
-                ya.b.a &= readspc(pc);
-                pc++;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x29:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(pc) + p.p;
-                pc++;
-                temp = readspc(addr) & readspc(addr2);
-                setspczn(temp);
-                writespc(addr2, temp);
-                spccount += 6;
-                break;
-            case 0x2B:
-                getdp(&addr);
-                temp  = readspc(addr);
-                templ = p.c;
-                p.c   = temp & 0x80;
-                temp <<= 1;
-                if (templ)
-                    temp |= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x2D:
-                writespc(sp + 0x100, ya.b.a);
-                sp--;
-                spccount += 4;
-                break;
-            case 0x2E:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (ya.b.a != temp) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 5;
-                break;
-            case 0x2F:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                pc += addr;
-                spccount += 4;
-                break;
-            case 0x30:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (p.n) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0x35:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                ya.b.a &= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0x36:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                ya.b.a &= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0x38:
-                temp2 = readspc(pc);
-                pc++;
-                getdp(&addr);
-                temp2 &= readspc(addr);
-                setspczn(temp2);
-                writespc(addr, temp2);
-                spccount += 5;
-                break;
-            case 0x3A:
-                getdp(&addr);
-                tempw = readspc(addr) + (readspc(addr + 1) << 8) + 1;
-                writespc(addr, tempw & 0xFF);
-                writespc(addr + 1, tempw >> 8);
-                p.z = !tempw;
-                p.n = tempw & 0x8000;
-                spccount += 6;
-                break;
-            case 0x3C:
-                templ = p.c;
-                p.c   = ya.b.a & 0x80;
-                ya.b.a <<= 1;
-                if (templ)
-                    ya.b.a |= 1;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x3D:
-                x++;
-                setspczn(x);
-                spccount += 2;
-                break;
-            case 0x3E:
-                getdp(&addr);
-                temp = readspc(addr);
-                setspczn(x - temp);
-                p.c = (x >= temp);
-                spccount += 3;
-                break;
-            case 0x3F:
-                addr = readspc(pc) + (readspc(pc + 1) << 8);
-                pc += 2;
-                writespc(sp + 0x100, pc >> 8);
-                sp--;
-                writespc(sp + 0x100, pc & 0xFF);
-                sp--;
-                pc = addr;
-                spccount += 8;
-                break;
-            case 0x40:
-                p.p = 0x100;
-                spccount += 2;
-                break;
-            case 0x44:
-                getdp(&addr);
-                ya.b.a ^= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0x45:
-                getabs(&addr);
-                ya.b.a ^= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 4;
-                break;
-            case 0x46:
-                addr = x + p.p;
-                ya.b.a ^= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0x47:
-                getdpx(&addr);
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8);
-                ya.b.a ^= readspc(addr2);
-                setspczn(ya.b.a);
-                spccount += 6;
-                break;
-            case 0x48:
-                ya.b.a ^= readspc(pc);
-                pc++;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x49:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(pc) + p.p;
-                pc++;
-                temp = readspc(addr) ^ readspc(addr2);
-                setspczn(temp);
-                writespc(addr2, temp);
-                spccount += 6;
-                break;
-            case 0x4B:
-                getdp(&addr);
-                temp = readspc(addr);
-                p.c  = temp & 1;
-                temp >>= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x4C:
-                getabs(&addr);
-                temp = readspc(addr);
-                p.c  = temp & 1;
-                temp >>= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0x4D:
-                writespc(sp + 0x100, x);
-                sp--;
-                spccount += 4;
-                break;
-            case 0x4E:
-                getabs(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.a & temp);
-                temp &= ~ya.b.a;
-                writespc(addr, temp);
-                spccount += 6;
-                break;
-            case 0x4F:
-                temp = readspc(pc);
-                pc++;
-                writespc(sp + 0x100, pc >> 8);
-                sp--;
-                writespc(sp + 0x100, pc & 0xFF);
-                sp--;
-                pc = 0xFF00 | temp;
-                spccount += 6;
-                break;
-            case 0x50:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!p.v) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0x55:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                ya.b.a ^= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0x56:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                ya.b.a ^= readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0x58:
-                temp2 = readspc(pc);
-                pc++;
-                getdp(&addr);
-                temp2 ^= readspc(addr);
-                setspczn(temp2);
-                writespc(addr, temp2);
-                spccount += 5;
-                break;
-            case 0x5A:
-                getdp(&addr);
-                tempw = readspc(addr) | (readspc(addr + 1) << 8);
-                setspczn16(ya.w - tempw);
-                spccount += 4;
-                break;
-            case 0x5B:
-                getdpx(&addr);
-                temp = readspc(addr);
-                p.c  = temp & 1;
-                temp >>= 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0x5C:
-                p.c = ya.b.a & 1;
-                ya.b.a >>= 1;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x5D:
-                x = ya.b.a;
-                setspczn(x);
-                spccount += 2;
-                break;
-            case 0x5E:
-                getabs(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.y - temp);
-                p.c = (ya.b.y >= temp);
-                spccount += 4;
-                break;
-            case 0x5F:
-                getabs(&addr);
-                pc = addr;
-                spccount += 3;
-                break;
-            case 0x60:
-                p.c = 0;
-                spccount += 2;
-                break;
-            case 0x64:
-                getdp(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 3;
-                break;
-            case 0x65:
-                getabs(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 4;
-                break;
-            case 0x66:
-                addr = x + p.p;
-                temp = readspc(addr);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 3;
-                break;
-            case 0x68:
-                temp = readspc(pc);
-                pc++;
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 2;
-                break;
-            case 0x69:
-                getdp(&addr);
-                addr2 = addr;
-                getdp(&addr);
-                temp  = readspc(addr2);
-                temp2 = readspc(addr);
-                p.c   = (temp >= temp2);
-                setspczn(temp - temp2);
-                spccount += 6;
-                break;
-            case 0x6B:
-                getdp(&addr);
-                temp  = readspc(addr);
-                templ = p.c;
-                p.c   = temp & 1;
-                temp >>= 1;
-                if (templ)
-                    temp |= 0x80;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x6D:
-                writespc(sp + 0x100, ya.b.y);
-                sp--;
-                spccount += 4;
-                break;
-            case 0x6E:
-                getdp(&addr);
-                temp = readspc(addr) - 1;
-                writespc(addr, temp);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (temp) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 5;
-                break;
-            case 0x6F:
-                sp++;
-                pc = readspc(sp + 0x100);
-                sp++;
-                pc |= (readspc(sp + 0x100) << 8);
-                spccount += 5;
-                break;
-            case 0x70:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (p.v) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0x74:
-                getdpx(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 5;
-                break;
-            case 0x75:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                temp = readspc(addr);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 5;
-                break;
-            case 0x76:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                temp = readspc(addr);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 5;
-                break;
-            case 0x77:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
-                temp  = readspc(addr2);
-                setspczn(ya.b.a - temp);
-                p.c = (ya.b.a >= temp);
-                spccount += 6;
-                break;
-            case 0x78:
-                temp = readspc(pc);
-                pc++;
-                getdp(&addr);
-                temp2 = readspc(addr);
-                setspczn(temp2 - temp);
-                p.c = (temp2 >= temp);
-                spccount += 5;
-                break;
-            case 0x7A:
-                addr = readspc(pc) + p.p;
-                pc++;
-                tempw = readspc(addr) | (readspc(addr + 1) << 8);
-                templ = ya.w + tempw;
-                p.v   = (!((ya.w ^ tempw) & 0x8000) && ((ya.w ^ templ) & 0x8000));
-                ya.w  = templ & 0xFFFF;
-                setspczn16(ya.w);
-                p.c = templ & 0x10000;
-                spccount += 5;
-                break;
-            case 0x7B:
-                getdpx(&addr);
-                temp  = readspc(addr);
-                templ = p.c;
-                p.c   = temp & 1;
-                temp >>= 1;
-                if (templ)
-                    temp |= 0x80;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x7C:
-                templ = p.c;
-                p.c   = ya.b.a & 1;
-                ya.b.a >>= 1;
-                if (templ)
-                    ya.b.a |= 0x80;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x7D:
-                ya.b.a = x;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x7E:
-                getdp(&addr);
-                temp = readspc(addr);
-                setspczn(ya.b.y - temp);
-                p.c = (ya.b.y >= temp);
-                spccount += 3;
-                break;
-            case 0x80:
-                p.c = 1;
-                spccount += 2;
-                break;
-            case 0x84:
-                getdp(&addr);
-                temp = readspc(addr);
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 3;
-                break;
-            case 0x85:
-                getabs(&addr);
-                temp = readspc(addr);
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 4;
-                break;
-            case 0x88:
-                temp = readspc(pc);
-                pc++;
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 2;
-                break;
-            case 0x89:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(pc) + p.p;
-                pc++;
-                temp  = readspc(addr);
-                temp2 = readspc(addr2);
-                ADC(&temp2, temp, &tempw);
-                writespc(addr2, temp2);
-                spccount += 6;
-                break;
-            case 0x8A:
-                addr = readspc(pc) | (readspc(pc + 1) << 8);
-                pc += 2;
-                tempw = addr >> 13;
-                addr &= 0x1FFF;
-                temp = readspc(addr);
-                p.c  = (p.c ? 1 : 0) ^ ((temp & (1 << tempw)) ? 1 : 0);
-                spccount += 5;
-                break;
-            case 0x8B:
-                getdp(&addr);
-                temp = readspc(addr) - 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0x8C:
-                getabs(&addr);
-                temp = readspc(addr) - 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0x8D:
-                ya.b.y = readspc(pc);
-                pc++;
-                setspczn(ya.b.y);
-                spccount += 2;
-                break;
-            case 0x8E:
-                sp++;
-                temp = readspc(sp + 0x100);
-                p.c  = temp & 0x01;
-                p.z  = temp & 0x02;
-                p.i  = temp & 0x04;
-                p.h  = temp & 0x08;
-                p.b  = temp & 0x10;
-                p.p  = (temp & 0x20) ? 0x100 : 0;
-                p.v  = temp & 0x40;
-                p.n  = temp & 0x80;
-                spccount += 4;
-                break;
-            case 0x8F:
-                temp = readspc(pc);
-                pc++;
-                getdp(&addr);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0x90:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!p.c) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0x94:
-                getdpx(&addr);
-                temp = readspc(addr);
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 4;
-                break;
-            case 0x95:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                temp = readspc(addr);
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 5;
-                break;
-            case 0x96:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                temp = readspc(addr);
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 5;
-                break;
-            case 0x97:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
-                temp  = readspc(addr2);
-                ADC(&ya.b.a, temp, &tempw);
-                spccount += 6;
-                break;
-            case 0x98:
-                temp2 = readspc(pc);
-                pc++;
-                getdp(&addr);
-                temp = readspc(addr);
-                ADC(&temp, temp2, &tempw);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0x9A:
-                addr = readspc(pc) + p.p;
-                pc++;
-                tempw = readspc(addr) | (readspc(addr + 1) << 8);
-                templ = ya.w - tempw;
-                p.v   = (((ya.w ^ tempw) & 0x8000) && ((ya.w ^ templ) & 0x8000));
-                ya.w  = templ & 0xFFFF;
-                p.c   = (ya.w >= tempw);
-                setspczn16(ya.w);
-                spccount += 5;
-                break;
-            case 0x9B:
-                getdpx(&addr);
-                temp = readspc(addr) - 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0x9C:
-                ya.b.a--;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0x9D:
-                x = sp;
-                setspczn(x);
-                spccount += 2;
-                break;
-            case 0x9E:
-                if (x) {
-                    temp   = ya.w / x;
-                    ya.b.y = ya.w % x;
-                    ya.b.a = temp;
-                    setspczn(temp);
-                    p.v = 0;
-                } else {
-                    ya.w = 0xFFFF;
-                    p.v  = 1;
-                }
-                spccount += 12;
-                break;
-            case 0x9F:
-                ya.b.a = (ya.b.a >> 4) | (ya.b.a << 4);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0xA4:
-                getdp(&addr);
-                temp = readspc(addr);
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 3;
-                break;
-            case 0xA5:
-                getabs(&addr);
-                temp = readspc(addr);
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 4;
-                break;
-            case 0xA8:
-                temp = readspc(pc);
-                pc++;
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 2;
-                break;
-            case 0xA9:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(pc) + p.p;
-                pc++;
-                temp  = readspc(addr);
-                temp2 = readspc(addr2);
-                SBC(&temp2, temp, &tempw);
-                writespc(addr2, temp2);
-                spccount += 6;
-                break;
-            case 0xAA:
-                getabs(&addr);
-                tempw = addr >> 13;
-                addr &= 0x1FFF;
-                temp = readspc(addr);
-                p.c  = temp & (1 << tempw);
-                spccount += 4;
-                break;
-            case 0xAB:
-                getdp(&addr);
-                temp = readspc(addr) + 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 4;
-                break;
-            case 0xAC:
-                getabs(&addr);
-                temp = readspc(addr) + 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0xAD:
-                temp = readspc(pc);
-                pc++;
-                setspczn(ya.b.y - temp);
-                p.c = (ya.b.y >= temp);
-                spccount += 2;
-                break;
-            case 0xAE:
-                sp++;
-                ya.b.a = readspc(sp + 0x100);
-                spccount += 4;
-                break;
-            case 0xAF:
-                writespc(x + p.p, ya.b.a);
-                x++;
-                spccount += 4;
-                break;
-            case 0xB0:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (p.c) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0xB4:
-                getdpx(&addr);
-                temp = readspc(addr);
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 4;
-                break;
-            case 0xB5:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                temp = readspc(addr);
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 5;
-                break;
-            case 0xB6:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                temp = readspc(addr);
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 5;
-                break;
-            case 0xB7:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
-                temp  = readspc(addr2);
-                SBC(&ya.b.a, temp, &tempw);
-                spccount += 6;
-                break;
-            case 0xB8:
-                temp2 = readspc(pc);
-                pc++;
-                getdp(&addr);
-                temp = readspc(addr);
-                SBC(&temp, temp2, &tempw);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0xBA:
-                getdp(&addr);
-                ya.b.a = readspc(addr);
-                ya.b.y = readspc(addr + 1);
-                setspczn16(ya.w);
-                spccount += 5;
-                break;
-            case 0xBB:
-                getdpx(&addr);
-                temp = readspc(addr) + 1;
-                setspczn(temp);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0xBC:
-                ya.b.a++;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0xBD:
-                sp = x;
-                spccount += 2;
-                break;
-            case 0xC0:
-                p.i = 0;
-                spccount += 3;
-                break;
-            case 0xC4:
-                getdp(&addr);
-                writespc(addr, ya.b.a);
-                spccount += 4;
-                break;
-            case 0xC5:
-                getabs(&addr);
-                writespc(addr, ya.b.a);
-                spccount += 5;
-                break;
-            case 0xC6:
-                writespc(x + p.p, ya.b.a);
-                spccount += 4;
-                break;
-            case 0xC7:
-                getdpx(&addr);
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8);
-                writespc(addr2, ya.b.a);
-                spccount += 7;
-                break;
-            case 0xC8:
-                temp = readspc(pc);
-                pc++;
-                setspczn(x - temp);
-                p.c = (x >= temp);
-                spccount += 2;
-                break;
-            case 0xC9:
-                getabs(&addr);
-                writespc(addr, x);
-                spccount += 5;
-                break;
-            case 0xCA:
-                addr = readspc(pc) | (readspc(pc + 1) << 8);
-                pc += 2;
-                tempw = addr >> 13;
-                addr &= 0x1FFF;
-                temp = readspc(addr);
-                if (p.c)
-                    temp |= (1 << tempw);
-                else
-                    temp &= ~(1 << tempw);
-                writespc(addr, temp);
-                spccount += 6;
-                break;
-            case 0xCB:
-                getdp(&addr);
-                writespc(addr, ya.b.y);
-                spccount += 4;
-                break;
-            case 0xCC:
-                getabs(&addr);
-                writespc(addr, ya.b.y);
-                spccount += 5;
-                break;
-            case 0xCD:
-                x = readspc(pc);
-                pc++;
-                setspczn(x);
-                spccount += 2;
-                break;
-            case 0xCE:
-                sp++;
-                x = readspc(sp + 0x100);
-                spccount += 4;
-                break;
-            case 0xCF:
-                ya.w = ya.b.a * ya.b.y;
-                setspczn(ya.b.y);
-                spccount += 9;
-                break;
-            case 0xD0:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!p.z) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0xD4:
-                getdpx(&addr);
-                writespc(addr, ya.b.a);
-                spccount += 5;
-                break;
-            case 0xD5:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                writespc(addr, ya.b.a);
-                spccount += 6;
-                break;
-            case 0xD6:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                writespc(addr, ya.b.a);
-                spccount += 6;
-                break;
-            case 0xD7:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
-                writespc(addr2, ya.b.a);
-                spccount += 7;
-                break;
-            case 0xD8:
-                getdp(&addr);
-                writespc(addr, x);
-                spccount += 4;
-                break;
-            case 0xD9:
-                addr = ((readspc(pc) + ya.b.y) & 0xFF) + p.p;
-                pc++;
-                writespc(addr, x);
-                spccount += 5;
-                break;
-            case 0xDA:
-                getdp(&addr);
-                writespc(addr, ya.b.a);
-                writespc(addr + 1, ya.b.y);
-                spccount += 5;
-                break;
-            case 0xDB:
-                getdpx(&addr);
-                writespc(addr, ya.b.y);
-                spccount += 5;
-                break;
-            case 0xDC:
-                ya.b.y--;
-                setspczn(ya.b.y);
-                spccount += 2;
-                break;
-            case 0xDD:
-                ya.b.a = ya.b.y;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0xDE:
-                getdpx(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (ya.b.a != temp) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 6;
-                break;
-            case 0xE0:
-                p.v = p.h = 0;
-                spccount += 2;
-                break;
-            case 0xE4:
-                getdp(&addr);
-                ya.b.a = readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0xE5:
-                getabs(&addr);
-                ya.b.a = readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 4;
-                break;
-            case 0xE6:
-                ya.b.a = readspc(x + p.p);
-                setspczn(ya.b.a);
-                spccount += 3;
-                break;
-            case 0xE7:
-                getdpx(&addr);
-                addr2  = readspc(addr) | (readspc(addr + 1) << 8);
-                ya.b.a = readspc(addr2);
-                setspczn(ya.b.a);
-                spccount += 6;
-                break;
-            case 0xE8:
-                ya.b.a = readspc(pc);
-                pc++;
-                setspczn(ya.b.a);
-                spccount += 2;
-                break;
-            case 0xE9:
-                getabs(&addr);
-                x = readspc(addr);
-                setspczn(x);
-                spccount += 4;
-                break;
-            case 0xEA:
-                addr = readspc(pc) | (readspc(pc + 1) << 8);
-                pc += 2;
-                tempw = addr >> 13;
-                addr &= 0x1FFF;
-                temp = readspc(addr);
-                temp ^= (1 << tempw);
-                writespc(addr, temp);
-                spccount += 5;
-                break;
-            case 0xEB:
-                getdp(&addr);
-                ya.b.y = readspc(addr);
-                setspczn(ya.b.y);
-                spccount += 3;
-                break;
-            case 0xEC:
-                getabs(&addr);
-                ya.b.y = readspc(addr);
-                setspczn(ya.b.y);
-                spccount += 4;
-                break;
-            case 0xED:
-                p.c = !p.c;
-                spccount += 3;
-                break;
-            case 0xEE:
-                sp++;
-                ya.b.y = readspc(sp + 0x100);
-                spccount += 4;
-                break;
-            case 0xF0:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (p.z) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 2;
-                break;
-            case 0xF4:
-                getdpx(&addr);
-                ya.b.a = readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 4;
-                break;
-            case 0xF5:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + x;
-                pc += 2;
-                ya.b.a = readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0xF6:
-                addr = readspc(pc) + (readspc(pc + 1) << 8) + ya.b.y;
-                pc += 2;
-                ya.b.a = readspc(addr);
-                setspczn(ya.b.a);
-                spccount += 5;
-                break;
-            case 0xF7:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(addr) + (readspc(addr + 1) << 8) + ya.b.y;
-
-                ya.b.a = readspc(addr2);
-                setspczn(ya.b.a);
-                spccount += 6;
-                break;
-            case 0xF8:
-                getdp(&addr);
-                x = readspc(addr);
-                setspczn(x);
-                spccount += 3;
-                break;
-            case 0xF9:
-                getdpy(&addr);
-                x = readspc(addr);
-                setspczn(x);
-                spccount += 3;
-                break;
-            case 0xFA:
-                addr = readspc(pc) + p.p;
-                pc++;
-                addr2 = readspc(pc) + p.p;
-                pc++;
-                temp = readspc(addr);
-                writespc(addr2, temp);
-                spccount += 5;
-                break;
-            case 0xFB:
-                getdpx(&addr);
-                ya.b.y = readspc(addr);
-                setspczn(ya.b.y);
-                spccount += 4;
-                break;
-            case 0xFC:
-                ya.b.y++;
-                setspczn(ya.b.y);
-                spccount += 2;
-                break;
-            case 0xFD:
-                ya.b.y = ya.b.a;
-                setspczn(ya.b.y);
-                spccount += 2;
-                break;
-            case 0xFE:
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                ya.b.y--;
-                if (ya.b.y) {
-                    pc += addr;
-                    spccount += 2;
-                }
-                spccount += 4;
-                break;
-            case 0x13:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x01)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x33:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x02)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x53:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x04)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x73:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x08)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x93:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x10)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0xB3:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x20)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0xD3:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x40)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0xF3:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if (!(temp & 0x80)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x03:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x01)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x23:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x02)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x43:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x04)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x63:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x08)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0x83:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x10)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0xA3:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x20)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0xC3:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x40)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            case 0xE3:
-                getdp(&addr);
-                temp = readspc(addr);
-                addr = readspc(pc);
-                pc++;
-                if (addr & 0x80)
-                    addr |= 0xFF00;
-                if ((temp & 0x80)) {
-                    pc += addr;
-                    spccount += 5;
-                }
-                spccount += 2;
-                break;
-            // kxkx
-            case 84: {
-                addr = readspc(pc);
-                pc++;
-                addr2  = ((addr + x) & 0xff) | (p.p ? 0x100 : 0);
-                ya.b.a = readspc(addr2);
-                setspczn(ya.b.a);
-            } break;
-            default:
-                printf("SPC - Bad opcode %d at %04X\n", opcode, pc);
-                // pc--;
-                // exit(-1);
+    uint8_t value = spc_read(adrl);
+    return value | (spc_read(adrh) << 8);
+}
+void SPC::spc_writeWord(uint16_t adrl, uint16_t adrh, uint16_t value)
+{
+    spc_write(adrl, value & 0xff);
+    spc_write(adrh, value >> 8);
+}
+// adressing modes
+uint16_t SPC::spc_adrDp()
+{
+    return spc_readOpcode() | (p << 8);
+}
+uint16_t SPC::spc_adrAbs()
+{
+    return spc_readOpcodeWord();
+}
+uint16_t SPC::spc_adrInd()
+{
+    return x | (p << 8);
+}
+uint16_t SPC::spc_adrIdx()
+{
+    uint8_t pointer = spc_readOpcode();
+    return spc_readWord(((pointer + x) & 0xff) | (p << 8), ((pointer + x + 1) & 0xff) | (p << 8));
+}
+uint16_t SPC::spc_adrImm()
+{
+    return pc++;
+}
+uint16_t SPC::spc_adrDpx()
+{
+    return ((spc_readOpcode() + x) & 0xff) | (p << 8);
+}
+uint16_t SPC::spc_adrDpy()
+{
+    return ((spc_readOpcode() + y) & 0xff) | (p << 8);
+}
+uint16_t SPC::spc_adrAbx()
+{
+    return (spc_readOpcodeWord() + x) & 0xffff;
+}
+uint16_t SPC::spc_adrAby()
+{
+    return (spc_readOpcodeWord() + y) & 0xffff;
+}
+uint16_t SPC::spc_adrIdy()
+{
+    uint8_t  pointer = spc_readOpcode();
+    uint16_t adr     = spc_readWord(pointer | (p << 8), ((pointer + 1) & 0xff) | (p << 8));
+    return (adr + y) & 0xffff;
+}
+uint16_t SPC::spc_adrDpDp(uint16_t *src)
+{
+    *src = spc_readOpcode() | (p << 8);
+    return spc_readOpcode() | (p << 8);
+}
+uint16_t SPC::spc_adrDpImm(uint16_t *src)
+{
+    *src = pc++;
+    return spc_readOpcode() | (p << 8);
+}
+uint16_t SPC::spc_adrIndInd(uint16_t *src)
+{
+    *src = y | (p << 8);
+    return x | (p << 8);
+}
+uint8_t SPC::spc_adrAbsBit(uint16_t *adr)
+{
+    uint16_t adrBit = spc_readOpcodeWord();
+    *adr            = adrBit & 0x1fff;
+    return adrBit >> 13;
+}
+uint16_t SPC::spc_adrDpWord(uint16_t *low)
+{
+    uint8_t adr = spc_readOpcode();
+    *low        = adr | (p << 8);
+    return ((adr + 1) & 0xff) | (p << 8);
+}
+uint16_t SPC::spc_adrIndP()
+{
+    return x++ | (p << 8);
+}
+// opcode functions
+void SPC::spc_and(uint16_t adr)
+{
+    a &= spc_read(adr);
+    spc_setZN(a);
+}
+void SPC::spc_andm(uint16_t dst, uint16_t src)
+{
+    uint8_t value  = spc_read(src);
+    uint8_t result = spc_read(dst) & value;
+    spc_write(dst, result);
+    spc_setZN(result);
+}
+void SPC::spc_or(uint16_t adr)
+{
+    a |= spc_read(adr);
+    spc_setZN(a);
+}
+void SPC::spc_orm(uint16_t dst, uint16_t src)
+{
+    uint8_t value  = spc_read(src);
+    uint8_t result = spc_read(dst) | value;
+    spc_write(dst, result);
+    spc_setZN(result);
+}
+void SPC::spc_eor(uint16_t adr)
+{
+    a ^= spc_read(adr);
+    spc_setZN(a);
+}
+void SPC::spc_eorm(uint16_t dst, uint16_t src)
+{
+    uint8_t value  = spc_read(src);
+    uint8_t result = spc_read(dst) ^ value;
+    spc_write(dst, result);
+    spc_setZN(result);
+}
+void SPC::spc_adc(uint16_t adr)
+{
+    uint8_t value  = spc_read(adr);
+    int     result = a + value + c;
+    v              = (a & 0x80) == (value & 0x80) && (value & 0x80) != (result & 0x80);
+    h              = ((a & 0xf) + (value & 0xf) + c) > 0xf;
+    c              = result > 0xff;
+    a              = result;
+    spc_setZN(a);
+}
+void SPC::spc_adcm(uint16_t dst, uint16_t src)
+{
+    uint8_t value   = spc_read(src);
+    uint8_t applyOn = spc_read(dst);
+    int     result  = applyOn + value + c;
+    v               = (applyOn & 0x80) == (value & 0x80) && (value & 0x80) != (result & 0x80);
+    h               = ((applyOn & 0xf) + (value & 0xf) + c) > 0xf;
+    c               = result > 0xff;
+    spc_write(dst, result);
+    spc_setZN(result);
+}
+void SPC::spc_sbc(uint16_t adr)
+{
+    uint8_t value  = spc_read(adr) ^ 0xff;
+    int     result = a + value + c;
+    v              = (a & 0x80) == (value & 0x80) && (value & 0x80) != (result & 0x80);
+    h              = ((a & 0xf) + (value & 0xf) + c) > 0xf;
+    c              = result > 0xff;
+    a              = result;
+    spc_setZN(a);
+}
+void SPC::spc_sbcm(uint16_t dst, uint16_t src)
+{
+    uint8_t value   = spc_read(src) ^ 0xff;
+    uint8_t applyOn = spc_read(dst);
+    int     result  = applyOn + value + c;
+    v               = (applyOn & 0x80) == (value & 0x80) && (value & 0x80) != (result & 0x80);
+    h               = ((applyOn & 0xf) + (value & 0xf) + c) > 0xf;
+    c               = result > 0xff;
+    spc_write(dst, result);
+    spc_setZN(result);
+}
+void SPC::spc_cmp(uint16_t adr)
+{
+    uint8_t value  = spc_read(adr) ^ 0xff;
+    int     result = a + value + 1;
+    c              = result > 0xff;
+    spc_setZN(result);
+}
+void SPC::spc_cmpx(uint16_t adr)
+{
+    uint8_t value  = spc_read(adr) ^ 0xff;
+    int     result = x + value + 1;
+    c              = result > 0xff;
+    spc_setZN(result);
+}
+void SPC::spc_cmpy(uint16_t adr)
+{
+    uint8_t value  = spc_read(adr) ^ 0xff;
+    int     result = y + value + 1;
+    c              = result > 0xff;
+    spc_setZN(result);
+}
+void SPC::spc_cmpm(uint16_t dst, uint16_t src)
+{
+    uint8_t value  = spc_read(src) ^ 0xff;
+    int     result = spc_read(dst) + value + 1;
+    c              = result > 0xff;
+    spc_setZN(result);
+}
+void SPC::spc_mov(uint16_t adr)
+{
+    a = spc_read(adr);
+    spc_setZN(a);
+}
+void SPC::spc_movx(uint16_t adr)
+{
+    x = spc_read(adr);
+    spc_setZN(x);
+}
+void SPC::spc_movy(uint16_t adr)
+{
+    y = spc_read(adr);
+    spc_setZN(y);
+}
+void SPC::spc_movs(uint16_t adr)
+{
+    spc_read(adr);
+    spc_write(adr, a);
+}
+void SPC::spc_movsx(uint16_t adr)
+{
+    spc_read(adr);
+    spc_write(adr, x);
+}
+void SPC::spc_movsy(uint16_t adr)
+{
+    spc_read(adr);
+    spc_write(adr, y);
+}
+void SPC::spc_asl(uint16_t adr)
+{
+    uint8_t val = spc_read(adr);
+    c           = val & 0x80;
+    val <<= 1;
+    spc_write(adr, val);
+    spc_setZN(val);
+}
+void SPC::spc_lsr(uint16_t adr)
+{
+    uint8_t val = spc_read(adr);
+    c           = val & 1;
+    val >>= 1;
+    spc_write(adr, val);
+    spc_setZN(val);
+}
+void SPC::spc_rol(uint16_t adr)
+{
+    uint8_t val  = spc_read(adr);
+    bool    newC = val & 0x80;
+    val          = (val << 1) | c;
+    c            = newC;
+    spc_write(adr, val);
+    spc_setZN(val);
+}
+void SPC::spc_ror(uint16_t adr)
+{
+    uint8_t val  = spc_read(adr);
+    bool    newC = val & 1;
+    val          = (val >> 1) | (c << 7);
+    c            = newC;
+    spc_write(adr, val);
+    spc_setZN(val);
+}
+void SPC::spc_inc(uint16_t adr)
+{
+    uint8_t val = spc_read(adr) + 1;
+    spc_write(adr, val);
+    spc_setZN(val);
+}
+void SPC::spc_dec(uint16_t adr)
+{
+    uint8_t val = spc_read(adr) - 1;
+    spc_write(adr, val);
+    spc_setZN(val);
+}
+void SPC::spc_doOpcode(uint8_t opcode)
+{
+    switch (opcode) {
+        case 0x00: {    // nop imp
+            // no operation
+            break;
         }
-        spccycles -= (spccount * 20.9395313f);
-        spctimer[0] -= spccount;
-        if (spctimer[0] <= 0) {
-            spctimer[0] += 128;
-            spctimer2[0]++;
-            if (spctimer2[0] == spclimit[0]) {
-                spctimer2[0] = 0;
-                spcram[0xFD]++;
+        case 0x01:
+        case 0x11:
+        case 0x21:
+        case 0x31:
+        case 0x41:
+        case 0x51:
+        case 0x61:
+        case 0x71:
+        case 0x81:
+        case 0x91:
+        case 0xa1:
+        case 0xb1:
+        case 0xc1:
+        case 0xd1:
+        case 0xe1:
+        case 0xf1: {    // tcall imp
+            spc_pushWord(pc);
+            uint16_t adr = 0xffde - (2 * (opcode >> 4));
+            pc           = spc_readWord(adr, adr + 1);
+            break;
+        }
+        case 0x02:
+        case 0x22:
+        case 0x42:
+        case 0x62:
+        case 0x82:
+        case 0xa2:
+        case 0xc2:
+        case 0xe2: {    // set1 dp
+            uint16_t adr = spc_adrDp();
+            spc_write(adr, spc_read(adr) | (1 << (opcode >> 5)));
+            break;
+        }
+        case 0x12:
+        case 0x32:
+        case 0x52:
+        case 0x72:
+        case 0x92:
+        case 0xb2:
+        case 0xd2:
+        case 0xf2: {    // clr1 dp
+            uint16_t adr = spc_adrDp();
+            spc_write(adr, spc_read(adr) & ~(1 << (opcode >> 5)));
+            break;
+        }
+        case 0x03:
+        case 0x23:
+        case 0x43:
+        case 0x63:
+        case 0x83:
+        case 0xa3:
+        case 0xc3:
+        case 0xe3: {    // bbs dp, rel
+            uint8_t val = spc_read(spc_adrDp());
+            spc_doBranch(spc_readOpcode(), val & (1 << (opcode >> 5)));
+            break;
+        }
+        case 0x13:
+        case 0x33:
+        case 0x53:
+        case 0x73:
+        case 0x93:
+        case 0xb3:
+        case 0xd3:
+        case 0xf3: {    // bbc dp, rel
+            uint8_t val = spc_read(spc_adrDp());
+            spc_doBranch(spc_readOpcode(), (val & (1 << (opcode >> 5))) == 0);
+            break;
+        }
+        case 0x04: {    // or  dp
+            spc_or(spc_adrDp());
+            break;
+        }
+        case 0x05: {    // or  abs
+            spc_or(spc_adrAbs());
+            break;
+        }
+        case 0x06: {    // or  ind
+            spc_or(spc_adrInd());
+            break;
+        }
+        case 0x07: {    // or  idx
+            spc_or(spc_adrIdx());
+            break;
+        }
+        case 0x08: {    // or  imm
+            spc_or(spc_adrImm());
+            break;
+        }
+        case 0x09: {    // orm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            spc_orm(dst, src);
+            break;
+        }
+        case 0x0a: {    // or1 abs.bit
+            uint16_t adr = 0;
+            uint8_t  bit = spc_adrAbsBit(&adr);
+            c            = c | ((spc_read(adr) >> bit) & 1);
+            break;
+        }
+        case 0x0b: {    // asl dp
+            spc_asl(spc_adrDp());
+            break;
+        }
+        case 0x0c: {    // asl abs
+            spc_asl(spc_adrAbs());
+            break;
+        }
+        case 0x0d: {    // pushp imp
+            spc_pushByte(spc_getFlags());
+            break;
+        }
+        case 0x0e: {    // tset1 abs
+            uint16_t adr    = spc_adrAbs();
+            uint8_t  val    = spc_read(adr);
+            uint8_t  result = a + (val ^ 0xff) + 1;
+            spc_setZN(result);
+            spc_write(adr, val | a);
+            break;
+        }
+        case 0x0f: {    // brk imp
+            spc_pushWord(pc);
+            spc_pushByte(spc_getFlags());
+            i  = false;
+            b  = true;
+            pc = spc_readWord(0xffde, 0xffdf);
+            break;
+        }
+        case 0x10: {    // bpl rel
+            spc_doBranch(spc_readOpcode(), !n);
+            break;
+        }
+        case 0x14: {    // or  dpx
+            spc_or(spc_adrDpx());
+            break;
+        }
+        case 0x15: {    // or  abx
+            spc_or(spc_adrAbx());
+            break;
+        }
+        case 0x16: {    // or  aby
+            spc_or(spc_adrAby());
+            break;
+        }
+        case 0x17: {    // or  idy
+            spc_or(spc_adrIdy());
+            break;
+        }
+        case 0x18: {    // orm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            spc_orm(dst, src);
+            break;
+        }
+        case 0x19: {    // orm ind, ind
+            uint16_t src = 0;
+            uint16_t dst = spc_adrIndInd(&src);
+            spc_orm(dst, src);
+            break;
+        }
+        case 0x1a: {    // decw dp
+            uint16_t low   = 0;
+            uint16_t high  = spc_adrDpWord(&low);
+            uint16_t value = spc_readWord(low, high) - 1;
+            z              = value == 0;
+            n              = value & 0x8000;
+            spc_writeWord(low, high, value);
+            break;
+        }
+        case 0x1b: {    // asl dpx
+            spc_asl(spc_adrDpx());
+            break;
+        }
+        case 0x1c: {    // asla imp
+            c = a & 0x80;
+            a <<= 1;
+            spc_setZN(a);
+            break;
+        }
+        case 0x1d: {    // decx imp
+            x--;
+            spc_setZN(x);
+            break;
+        }
+        case 0x1e: {    // cmpx abs
+            spc_cmpx(spc_adrAbs());
+            break;
+        }
+        case 0x1f: {    // jmp iax
+            uint16_t pointer = spc_readOpcodeWord();
+            pc               = spc_readWord((pointer + x) & 0xffff, (pointer + x + 1) & 0xffff);
+            break;
+        }
+        case 0x20: {    // clrp imp
+            p = false;
+            break;
+        }
+        case 0x24: {    // and dp
+            spc_and(spc_adrDp());
+            break;
+        }
+        case 0x25: {    // and abs
+            spc_and(spc_adrAbs());
+            break;
+        }
+        case 0x26: {    // and ind
+            spc_and(spc_adrInd());
+            break;
+        }
+        case 0x27: {    // and idx
+            spc_and(spc_adrIdx());
+            break;
+        }
+        case 0x28: {    // and imm
+            spc_and(spc_adrImm());
+            break;
+        }
+        case 0x29: {    // andm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            spc_andm(dst, src);
+            break;
+        }
+        case 0x2a: {    // or1n abs.bit
+            uint16_t adr = 0;
+            uint8_t  bit = spc_adrAbsBit(&adr);
+            c            = c | (~(spc_read(adr) >> bit) & 1);
+            break;
+        }
+        case 0x2b: {    // rol dp
+            spc_rol(spc_adrDp());
+            break;
+        }
+        case 0x2c: {    // rol abs
+            spc_rol(spc_adrAbs());
+            break;
+        }
+        case 0x2d: {    // pusha imp
+            spc_pushByte(a);
+            break;
+        }
+        case 0x2e: {    // cbne dp, rel
+            uint8_t val    = spc_read(spc_adrDp()) ^ 0xff;
+            uint8_t result = a + val + 1;
+            spc_doBranch(spc_readOpcode(), result != 0);
+            break;
+        }
+        case 0x2f: {    // bra rel
+            pc += (int8_t)spc_readOpcode();
+            break;
+        }
+        case 0x30: {    // bmi rel
+            spc_doBranch(spc_readOpcode(), n);
+            break;
+        }
+        case 0x34: {    // and dpx
+            spc_and(spc_adrDpx());
+            break;
+        }
+        case 0x35: {    // and abx
+            spc_and(spc_adrAbx());
+            break;
+        }
+        case 0x36: {    // and aby
+            spc_and(spc_adrAby());
+            break;
+        }
+        case 0x37: {    // and idy
+            spc_and(spc_adrIdy());
+            break;
+        }
+        case 0x38: {    // andm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            spc_andm(dst, src);
+            break;
+        }
+        case 0x39: {    // andm ind, ind
+            uint16_t src = 0;
+            uint16_t dst = spc_adrIndInd(&src);
+            spc_andm(dst, src);
+            break;
+        }
+        case 0x3a: {    // incw dp
+            uint16_t low   = 0;
+            uint16_t high  = spc_adrDpWord(&low);
+            uint16_t value = spc_readWord(low, high) + 1;
+            z              = value == 0;
+            n              = value & 0x8000;
+            spc_writeWord(low, high, value);
+            break;
+        }
+        case 0x3b: {    // rol dpx
+            spc_rol(spc_adrDpx());
+            break;
+        }
+        case 0x3c: {    // rola imp
+            bool newC = a & 0x80;
+            a         = (a << 1) | c;
+            c         = newC;
+            spc_setZN(a);
+            break;
+        }
+        case 0x3d: {    // incx imp
+            x++;
+            spc_setZN(x);
+            break;
+        }
+        case 0x3e: {    // cmpx dp
+            spc_cmpx(spc_adrDp());
+            break;
+        }
+        case 0x3f: {    // call abs
+            uint16_t dst = spc_readOpcodeWord();
+            spc_pushWord(pc);
+            pc = dst;
+            break;
+        }
+        case 0x40: {    // setp imp
+            p = true;
+            break;
+        }
+        case 0x44: {    // eor dp
+            spc_eor(spc_adrDp());
+            break;
+        }
+        case 0x45: {    // eor abs
+            spc_eor(spc_adrAbs());
+            break;
+        }
+        case 0x46: {    // eor ind
+            spc_eor(spc_adrInd());
+            break;
+        }
+        case 0x47: {    // eor idx
+            spc_eor(spc_adrIdx());
+            break;
+        }
+        case 0x48: {    // eor imm
+            spc_eor(spc_adrImm());
+            break;
+        }
+        case 0x49: {    // eorm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            spc_eorm(dst, src);
+            break;
+        }
+        case 0x4a: {    // and1 abs.bit
+            uint16_t adr = 0;
+            uint8_t  bit = spc_adrAbsBit(&adr);
+            c            = c & ((spc_read(adr) >> bit) & 1);
+            break;
+        }
+        case 0x4b: {    // lsr dp
+            spc_lsr(spc_adrDp());
+            break;
+        }
+        case 0x4c: {    // lsr abs
+            spc_lsr(spc_adrAbs());
+            break;
+        }
+        case 0x4d: {    // pushx imp
+            spc_pushByte(x);
+            break;
+        }
+        case 0x4e: {    // tclr1 abs
+            uint16_t adr    = spc_adrAbs();
+            uint8_t  val    = spc_read(adr);
+            uint8_t  result = a + (val ^ 0xff) + 1;
+            spc_setZN(result);
+            spc_write(adr, val & ~a);
+            break;
+        }
+        case 0x4f: {    // pcall dp
+            uint8_t dst = spc_readOpcode();
+            spc_pushWord(pc);
+            pc = 0xff00 | dst;
+            break;
+        }
+        case 0x50: {    // bvc rel
+            spc_doBranch(spc_readOpcode(), !v);
+            break;
+        }
+        case 0x54: {    // eor dpx
+            spc_eor(spc_adrDpx());
+            break;
+        }
+        case 0x55: {    // eor abx
+            spc_eor(spc_adrAbx());
+            break;
+        }
+        case 0x56: {    // eor aby
+            spc_eor(spc_adrAby());
+            break;
+        }
+        case 0x57: {    // eor idy
+            spc_eor(spc_adrIdy());
+            break;
+        }
+        case 0x58: {    // eorm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            spc_eorm(dst, src);
+            break;
+        }
+        case 0x59: {    // eorm ind, ind
+            uint16_t src = 0;
+            uint16_t dst = spc_adrIndInd(&src);
+            spc_eorm(dst, src);
+            break;
+        }
+        case 0x5a: {    // cmpw dp
+            uint16_t low    = 0;
+            uint16_t high   = spc_adrDpWord(&low);
+            uint16_t value  = spc_readWord(low, high) ^ 0xffff;
+            uint16_t ya     = a | (y << 8);
+            int      result = ya + value + 1;
+            c               = result > 0xffff;
+            z               = (result & 0xffff) == 0;
+            n               = result & 0x8000;
+            break;
+        }
+        case 0x5b: {    // lsr dpx
+            spc_lsr(spc_adrDpx());
+            break;
+        }
+        case 0x5c: {    // lsra imp
+            c = a & 1;
+            a >>= 1;
+            spc_setZN(a);
+            break;
+        }
+        case 0x5d: {    // movxa imp
+            x = a;
+            spc_setZN(x);
+            break;
+        }
+        case 0x5e: {    // cmpy abs
+            spc_cmpy(spc_adrAbs());
+            break;
+        }
+        case 0x5f: {    // jmp abs
+            pc = spc_readOpcodeWord();
+            break;
+        }
+        case 0x60: {    // clrc imp
+            c = false;
+            break;
+        }
+        case 0x64: {    // cmp dp
+            spc_cmp(spc_adrDp());
+            break;
+        }
+        case 0x65: {    // cmp abs
+            spc_cmp(spc_adrAbs());
+            break;
+        }
+        case 0x66: {    // cmp ind
+            spc_cmp(spc_adrInd());
+            break;
+        }
+        case 0x67: {    // cmp idx
+            spc_cmp(spc_adrIdx());
+            break;
+        }
+        case 0x68: {    // cmp imm
+            spc_cmp(spc_adrImm());
+            break;
+        }
+        case 0x69: {    // cmpm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            spc_cmpm(dst, src);
+            break;
+        }
+        case 0x6a: {    // and1n abs.bit
+            uint16_t adr = 0;
+            uint8_t  bit = spc_adrAbsBit(&adr);
+            c            = c & (~(spc_read(adr) >> bit) & 1);
+            break;
+        }
+        case 0x6b: {    // ror dp
+            spc_ror(spc_adrDp());
+            break;
+        }
+        case 0x6c: {    // ror abs
+            spc_ror(spc_adrAbs());
+            break;
+        }
+        case 0x6d: {    // pushy imp
+            spc_pushByte(y);
+            break;
+        }
+        case 0x6e: {    // dbnz dp, rel
+            uint16_t adr    = spc_adrDp();
+            uint8_t  result = spc_read(adr) - 1;
+            spc_write(adr, result);
+            spc_doBranch(spc_readOpcode(), result != 0);
+            break;
+        }
+        case 0x6f: {    // ret imp
+            pc = spc_pullWord();
+            break;
+        }
+        case 0x70: {    // bvs rel
+            spc_doBranch(spc_readOpcode(), v);
+            break;
+        }
+        case 0x74: {    // cmp dpx
+            spc_cmp(spc_adrDpx());
+            break;
+        }
+        case 0x75: {    // cmp abx
+            spc_cmp(spc_adrAbx());
+            break;
+        }
+        case 0x76: {    // cmp aby
+            spc_cmp(spc_adrAby());
+            break;
+        }
+        case 0x77: {    // cmp idy
+            spc_cmp(spc_adrIdy());
+            break;
+        }
+        case 0x78: {    // cmpm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            spc_cmpm(dst, src);
+            break;
+        }
+        case 0x79: {    // cmpm ind, ind
+            uint16_t src = 0;
+            uint16_t dst = spc_adrIndInd(&src);
+            spc_cmpm(dst, src);
+            break;
+        }
+        case 0x7a: {    // addw dp
+            uint16_t low    = 0;
+            uint16_t high   = spc_adrDpWord(&low);
+            uint16_t value  = spc_readWord(low, high);
+            uint16_t ya     = a | (y << 8);
+            int      result = ya + value;
+            v               = (ya & 0x8000) == (value & 0x8000) && (value & 0x8000) != (result & 0x8000);
+            h               = ((ya & 0xfff) + (value & 0xfff) + 1) > 0xfff;
+            c               = result > 0xffff;
+            z               = (result & 0xffff) == 0;
+            n               = result & 0x8000;
+            a               = result & 0xff;
+            y               = result >> 8;
+            break;
+        }
+        case 0x7b: {    // ror dpx
+            spc_ror(spc_adrDpx());
+            break;
+        }
+        case 0x7c: {    // rora imp
+            bool newC = a & 1;
+            a         = (a >> 1) | (c << 7);
+            c         = newC;
+            spc_setZN(a);
+            break;
+        }
+        case 0x7d: {    // movax imp
+            a = x;
+            spc_setZN(a);
+            break;
+        }
+        case 0x7e: {    // cmpy dp
+            spc_cmpy(spc_adrDp());
+            break;
+        }
+        case 0x7f: {    // reti imp
+            spc_setFlags(spc_pullByte());
+            pc = spc_pullWord();
+            break;
+        }
+        case 0x80: {    // setc imp
+            c = true;
+            break;
+        }
+        case 0x84: {    // adc dp
+            spc_adc(spc_adrDp());
+            break;
+        }
+        case 0x85: {    // adc abs
+            spc_adc(spc_adrAbs());
+            break;
+        }
+        case 0x86: {    // adc ind
+            spc_adc(spc_adrInd());
+            break;
+        }
+        case 0x87: {    // adc idx
+            spc_adc(spc_adrIdx());
+            break;
+        }
+        case 0x88: {    // adc imm
+            spc_adc(spc_adrImm());
+            break;
+        }
+        case 0x89: {    // adcm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            spc_adcm(dst, src);
+            break;
+        }
+        case 0x8a: {    // eor1 abs.bit
+            uint16_t adr = 0;
+            uint8_t  bit = spc_adrAbsBit(&adr);
+            c            = c ^ ((spc_read(adr) >> bit) & 1);
+            break;
+        }
+        case 0x8b: {    // dec dp
+            spc_dec(spc_adrDp());
+            break;
+        }
+        case 0x8c: {    // dec abs
+            spc_dec(spc_adrAbs());
+            break;
+        }
+        case 0x8d: {    // movy imm
+            spc_movy(spc_adrImm());
+            break;
+        }
+        case 0x8e: {    // popp imp
+            spc_setFlags(spc_pullByte());
+            break;
+        }
+        case 0x8f: {    // movm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            uint8_t  val = spc_read(src);
+            spc_read(dst);
+            spc_write(dst, val);
+            break;
+        }
+        case 0x90: {    // bcc rel
+            spc_doBranch(spc_readOpcode(), !c);
+            break;
+        }
+        case 0x94: {    // adc dpx
+            spc_adc(spc_adrDpx());
+            break;
+        }
+        case 0x95: {    // adc abx
+            spc_adc(spc_adrAbx());
+            break;
+        }
+        case 0x96: {    // adc aby
+            spc_adc(spc_adrAby());
+            break;
+        }
+        case 0x97: {    // adc idy
+            spc_adc(spc_adrIdy());
+            break;
+        }
+        case 0x98: {    // adcm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            spc_adcm(dst, src);
+            break;
+        }
+        case 0x99: {    // adcm ind, ind
+            uint16_t src = 0;
+            uint16_t dst = spc_adrIndInd(&src);
+            spc_adcm(dst, src);
+            break;
+        }
+        case 0x9a: {    // subw dp
+            uint16_t low    = 0;
+            uint16_t high   = spc_adrDpWord(&low);
+            uint16_t value  = spc_readWord(low, high) ^ 0xffff;
+            uint16_t ya     = a | (y << 8);
+            int      result = ya + value + 1;
+            v               = (ya & 0x8000) == (value & 0x8000) && (value & 0x8000) != (result & 0x8000);
+            h               = ((ya & 0xfff) + (value & 0xfff) + 1) > 0xfff;
+            c               = result > 0xffff;
+            z               = (result & 0xffff) == 0;
+            n               = result & 0x8000;
+            a               = result & 0xff;
+            y               = result >> 8;
+            break;
+        }
+        case 0x9b: {    // dec dpx
+            spc_dec(spc_adrDpx());
+            break;
+        }
+        case 0x9c: {    // deca imp
+            a--;
+            spc_setZN(a);
+            break;
+        }
+        case 0x9d: {    // movxp imp
+            x = sp;
+            spc_setZN(x);
+            break;
+        }
+        case 0x9e: {    // div imp
+            // TODO: proper division algorithm
+            uint16_t value  = a | (y << 8);
+            int      result = 0xffff;
+            int      mod    = a;
+            if (x != 0) {
+                result = value / x;
+                mod    = value % x;
             }
-            spctimer2[0] &= 255;
+            v = result > 0xff;
+            h = (x & 0xf) <= (y & 0xf);
+            a = result;
+            y = mod;
+            spc_setZN(a);
+            break;
         }
-        spctimer[1] -= spccount;
-        if (spctimer[1] <= 0) {
-            spctimer[1] += 128;
-            spctimer2[1]++;
-            if (spctimer2[1] == spclimit[1]) {
-                spctimer2[1] = 0;
-                spcram[0xFE]++;
+        case 0x9f: {    // xcn imp
+            a = (a >> 4) | (a << 4);
+            spc_setZN(a);
+            break;
+        }
+        case 0xa0: {    // ei  imp
+            i = true;
+            break;
+        }
+        case 0xa4: {    // sbc dp
+            spc_sbc(spc_adrDp());
+            break;
+        }
+        case 0xa5: {    // sbc abs
+            spc_sbc(spc_adrAbs());
+            break;
+        }
+        case 0xa6: {    // sbc ind
+            spc_sbc(spc_adrInd());
+            break;
+        }
+        case 0xa7: {    // sbc idx
+            spc_sbc(spc_adrIdx());
+            break;
+        }
+        case 0xa8: {    // sbc imm
+            spc_sbc(spc_adrImm());
+            break;
+        }
+        case 0xa9: {    // sbcm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            spc_sbcm(dst, src);
+            break;
+        }
+        case 0xaa: {    // mov1 abs.bit
+            uint16_t adr = 0;
+            uint8_t  bit = spc_adrAbsBit(&adr);
+            c            = (spc_read(adr) >> bit) & 1;
+            break;
+        }
+        case 0xab: {    // inc dp
+            spc_inc(spc_adrDp());
+            break;
+        }
+        case 0xac: {    // inc abs
+            spc_inc(spc_adrAbs());
+            break;
+        }
+        case 0xad: {    // cmpy imm
+            spc_cmpy(spc_adrImm());
+            break;
+        }
+        case 0xae: {    // popa imp
+            a = spc_pullByte();
+            break;
+        }
+        case 0xaf: {    // movs ind+
+            uint16_t adr = spc_adrIndP();
+            spc_write(adr, a);
+            break;
+        }
+        case 0xb0: {    // bcs rel
+            spc_doBranch(spc_readOpcode(), c);
+            break;
+        }
+        case 0xb4: {    // sbc dpx
+            spc_sbc(spc_adrDpx());
+            break;
+        }
+        case 0xb5: {    // sbc abx
+            spc_sbc(spc_adrAbx());
+            break;
+        }
+        case 0xb6: {    // sbc aby
+            spc_sbc(spc_adrAby());
+            break;
+        }
+        case 0xb7: {    // sbc idy
+            spc_sbc(spc_adrIdy());
+            break;
+        }
+        case 0xb8: {    // sbcm dp, imm
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpImm(&src);
+            spc_sbcm(dst, src);
+            break;
+        }
+        case 0xb9: {    // sbcm ind, ind
+            uint16_t src = 0;
+            uint16_t dst = spc_adrIndInd(&src);
+            spc_sbcm(dst, src);
+            break;
+        }
+        case 0xba: {    // movw dp
+            uint16_t low  = 0;
+            uint16_t high = spc_adrDpWord(&low);
+            uint16_t val  = spc_readWord(low, high);
+            a             = val & 0xff;
+            y             = val >> 8;
+            z             = val == 0;
+            n             = val & 0x8000;
+            break;
+        }
+        case 0xbb: {    // inc dpx
+            spc_inc(spc_adrDpx());
+            break;
+        }
+        case 0xbc: {    // inca imp
+            a++;
+            spc_setZN(a);
+            break;
+        }
+        case 0xbd: {    // movpx imp
+            sp = x;
+            break;
+        }
+        case 0xbe: {    // das imp
+            if (a > 0x99 || !c) {
+                a -= 0x60;
+                c = false;
             }
-            spctimer2[1] &= 255;
-        }
-        spctimer[2] -= spccount;
-        if (spctimer[2] <= 0) {
-            spctimer[2] += 16;
-            spctimer2[2]++;
-            if (spctimer2[2] == spclimit[2]) {
-                spctimer2[2] = 0;
-                spcram[0xFF]++;
+            if ((a & 0xf) > 9 || !h) {
+                a -= 6;
             }
-            spctimer2[2] &= 255;
+            spc_setZN(a);
+            break;
         }
-        dsptotal -= spccount;
-        if (dsptotal <= 0) {
-            dsptotal += 32;
-            snes->dsp->polldsp();
+        case 0xbf: {    // mov ind+
+            uint16_t adr = spc_adrIndP();
+            a            = spc_read(adr);
+            spc_setZN(a);
+            break;
+        }
+        case 0xc0: {    // di  imp
+            i = false;
+            break;
+        }
+        case 0xc4: {    // movs dp
+            spc_movs(spc_adrDp());
+            break;
+        }
+        case 0xc5: {    // movs abs
+            spc_movs(spc_adrAbs());
+            break;
+        }
+        case 0xc6: {    // movs ind
+            spc_movs(spc_adrInd());
+            break;
+        }
+        case 0xc7: {    // movs idx
+            spc_movs(spc_adrIdx());
+            break;
+        }
+        case 0xc8: {    // cmpx imm
+            spc_cmpx(spc_adrImm());
+            break;
+        }
+        case 0xc9: {    // movsx abs
+            spc_movsx(spc_adrAbs());
+            break;
+        }
+        case 0xca: {    // mov1s abs.bit
+            uint16_t adr    = 0;
+            uint8_t  bit    = spc_adrAbsBit(&adr);
+            uint8_t  result = (spc_read(adr) & (~(1 << bit))) | (c << bit);
+            spc_write(adr, result);
+            break;
+        }
+        case 0xcb: {    // movsy dp
+            spc_movsy(spc_adrDp());
+            break;
+        }
+        case 0xcc: {    // movsy abs
+            spc_movsy(spc_adrAbs());
+            break;
+        }
+        case 0xcd: {    // movx imm
+            spc_movx(spc_adrImm());
+            break;
+        }
+        case 0xce: {    // popx imp
+            x = spc_pullByte();
+            break;
+        }
+        case 0xcf: {    // mul imp
+            uint16_t result = a * y;
+            a               = result & 0xff;
+            y               = result >> 8;
+            spc_setZN(y);
+            break;
+        }
+        case 0xd0: {    // bne rel
+            spc_doBranch(spc_readOpcode(), !z);
+            break;
+        }
+        case 0xd4: {    // movs dpx
+            spc_movs(spc_adrDpx());
+            break;
+        }
+        case 0xd5: {    // movs abx
+            spc_movs(spc_adrAbx());
+            break;
+        }
+        case 0xd6: {    // movs aby
+            spc_movs(spc_adrAby());
+            break;
+        }
+        case 0xd7: {    // movs idy
+            spc_movs(spc_adrIdy());
+            break;
+        }
+        case 0xd8: {    // movsx dp
+            spc_movsx(spc_adrDp());
+            break;
+        }
+        case 0xd9: {    // movsx dpy
+            spc_movsx(spc_adrDpy());
+            break;
+        }
+        case 0xda: {    // movws dp
+            uint16_t low  = 0;
+            uint16_t high = spc_adrDpWord(&low);
+            spc_read(low);
+            spc_write(low, a);
+            spc_write(high, y);
+            break;
+        }
+        case 0xdb: {    // movsy dpx
+            spc_movsy(spc_adrDpx());
+            break;
+        }
+        case 0xdc: {    // decy imp
+            y--;
+            spc_setZN(y);
+            break;
+        }
+        case 0xdd: {    // movay imp
+            a = y;
+            spc_setZN(a);
+            break;
+        }
+        case 0xde: {    // cbne dpx, rel
+            uint8_t val    = spc_read(spc_adrDpx()) ^ 0xff;
+            uint8_t result = a + val + 1;
+            spc_doBranch(spc_readOpcode(), result != 0);
+            break;
+        }
+        case 0xdf: {    // daa imp
+            if (a > 0x99 || c) {
+                a += 0x60;
+                c = true;
+            }
+            if ((a & 0xf) > 9 || h) {
+                a += 6;
+            }
+            spc_setZN(a);
+            break;
+        }
+        case 0xe0: {    // clrv imp
+            v = false;
+            h = false;
+            break;
+        }
+        case 0xe4: {    // mov dp
+            spc_mov(spc_adrDp());
+            break;
+        }
+        case 0xe5: {    // mov abs
+            spc_mov(spc_adrAbs());
+            break;
+        }
+        case 0xe6: {    // mov ind
+            spc_mov(spc_adrInd());
+            break;
+        }
+        case 0xe7: {    // mov idx
+            spc_mov(spc_adrIdx());
+            break;
+        }
+        case 0xe8: {    // mov imm
+            spc_mov(spc_adrImm());
+            break;
+        }
+        case 0xe9: {    // movx abs
+            spc_movx(spc_adrAbs());
+            break;
+        }
+        case 0xea: {    // not1 abs.bit
+            uint16_t adr    = 0;
+            uint8_t  bit    = spc_adrAbsBit(&adr);
+            uint8_t  result = spc_read(adr) ^ (1 << bit);
+            spc_write(adr, result);
+            break;
+        }
+        case 0xeb: {    // movy dp
+            spc_movy(spc_adrDp());
+            break;
+        }
+        case 0xec: {    // movy abs
+            spc_movy(spc_adrAbs());
+            break;
+        }
+        case 0xed: {    // notc imp
+            c = !c;
+            break;
+        }
+        case 0xee: {    // popy imp
+            y = spc_pullByte();
+            break;
+        }
+        case 0xef: {           // sleep imp
+            stopped = true;    // no interrupts, so sleeping stops as well
+            break;
+        }
+        case 0xf0: {    // beq rel
+            spc_doBranch(spc_readOpcode(), z);
+            break;
+        }
+        case 0xf4: {    // mov dpx
+            spc_mov(spc_adrDpx());
+            break;
+        }
+        case 0xf5: {    // mov abx
+            spc_mov(spc_adrAbx());
+            break;
+        }
+        case 0xf6: {    // mov aby
+            spc_mov(spc_adrAby());
+            break;
+        }
+        case 0xf7: {    // mov idy
+            spc_mov(spc_adrIdy());
+            break;
+        }
+        case 0xf8: {    // movx dp
+            spc_movx(spc_adrDp());
+            break;
+        }
+        case 0xf9: {    // movx dpy
+            spc_movx(spc_adrDpy());
+            break;
+        }
+        case 0xfa: {    // movm dp, dp
+            uint16_t src = 0;
+            uint16_t dst = spc_adrDpDp(&src);
+            uint8_t  val = spc_read(src);
+            spc_write(dst, val);
+            break;
+        }
+        case 0xfb: {    // movy dpx
+            spc_movy(spc_adrDpx());
+            break;
+        }
+        case 0xfc: {    // incy imp
+            y++;
+            spc_setZN(y);
+            break;
+        }
+        case 0xfd: {    // movya imp
+            y = a;
+            spc_setZN(y);
+            break;
+        }
+        case 0xfe: {    // dbnzy rel
+            y--;
+            spc_doBranch(spc_readOpcode(), y != 0);
+            break;
+        }
+        case 0xff: {    // stop imp
+            stopped = true;
+            break;
+        }
+        default: {
+            printf("spc op error : %X", opcode);
+            exit(1);
         }
     }
 }

@@ -1,143 +1,182 @@
-#ifndef _PPU_H_
-#define _PPU_H_
-#include "../allegro.h"
-#include <cstdint>
+#ifndef PPU_H
+#define PPU_H
+#include <stdint.h>
 
-typedef struct
+
+typedef struct BgLayer
 {
-    uint8_t r, g, b;
-} rgb_color;
+    uint16_t hScroll       = 0;
+    uint16_t vScroll       = 0;
+    bool     tilemapWider  = false;
+    bool     tilemapHigher = false;
+    uint16_t tilemapAdr    = 0;
+    uint16_t tileAdr       = 0;
+    bool     bigTiles      = false;
+    bool     mosaicEnabled = false;
+} BgLayer;
 
-class SNES;
-class PPU {
+typedef struct Layer
+{
+    bool mainScreenEnabled  = false;
+    bool subScreenEnabled   = false;
+    bool mainScreenWindowed = false;
+    bool subScreenWindowed  = false;
+} Layer;
+
+typedef struct WindowLayer
+{
+    bool    window1enabled  = false;
+    bool    window2enabled  = false;
+    bool    window1inversed = false;
+    bool    window2inversed = false;
+    uint8_t maskLogic       = 0;
+} WindowLayer;
+
+
+struct Snes;
+class Ppu {
   public:
-    SNES *snes = nullptr;
+    Snes *snes = nullptr;
 
-    uint8_t  *vramb     = nullptr;
-    uint16_t *vram      = nullptr;
-    int       ppumask   = 0;
-    uint32_t  wroteaddr = 0;
-    int       hcount = 0, vcount = 0;
-    int       twowrite       = 0;
-    int       windowschanged = 0;
-    int       spcskip        = 4;
-    int       lastline       = 0;
-    int       windowdisable  = 0;
+    uint16_t vram[0x8000]                   = {};
+    uint16_t cgram[0x100]                   = {};
+    uint16_t oam[0x100]                     = {};
+    uint8_t  highOam[0x20]                  = {};
+    uint8_t  objPixelBuffer[256]            = {};
+    uint8_t  objPriorityBuffer[256]         = {};
+    int16_t  m7matrix[8]                    = {};    // a, b, c, d, x, y, h, v
+    bool     mathEnabled[6]                 = {};
+    uint8_t  pixelBuffer[512 * 4 * 239 * 2] = {};
 
-    BITMAP *dasbuffer = NULL;
-    BITMAP *b = NULL, *mainscr = NULL, *subscr = NULL, *otherscr = NULL, *sysb = NULL;
+    Layer       layer[5];
+    BgLayer     bgLayer[4];
+    WindowLayer windowLayer[6];
 
-  public:
-    uint32_t window[10][164]    = {};
-    uint32_t bitlookup[2][4][4] = {}, masklookup[2][4] = {};
-    uint16_t bitlookuph[2][4][4] = {}, masklookuph[2][4] = {};
-    uint16_t pallookup[16][256] = {};
-    uint32_t collookup[16]      = {};
-    uint8_t  sprram[544]        = {};
-    int      bgtype[8][4]       = {
-                   {2, 3, 3, 3}, {4, 4, 2, 0}, {4, 4, 0, 0}, {8, 4, 0, 0}, {8, 2, 0, 0}, {5, 6, 0, 0}, {0, 0, 0, 0}, {7, 0, 0, 0},
-    };
-    int      draworder[16][12] = {{3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 9, 1, 0, 10, 5, 4, 11, 6},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11},
-                                  {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}, {3, 2, 8, 7, 6, 9, 1, 0, 10, 5, 4, 11}};
-    uint16_t ylookup[4][64]    = {
-           {0x000, 0x020, 0x040, 0x060, 0x080, 0x0A0, 0x0C0, 0x0E0, 0x100, 0x120, 0x140, 0x160, 0x180,
-            0x1A0, 0x1C0, 0x1E0, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x2E0, 0x300, 0x320,
-            0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0x000, 0x020, 0x040, 0x060, 0x080, 0x0A0, 0x0C0,
-            0x0E0, 0x100, 0x120, 0x140, 0x160, 0x180, 0x1A0, 0x1C0, 0x1E0, 0x200, 0x220, 0x240, 0x260,
-            0x280, 0x2A0, 0x2C0, 0x2E0, 0x300, 0x320, 0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0},
-           {0x000, 0x020, 0x040, 0x060, 0x080, 0x0A0, 0x0C0, 0x0E0, 0x100, 0x120, 0x140, 0x160, 0x180,
-            0x1A0, 0x1C0, 0x1E0, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x2E0, 0x300, 0x320,
-            0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0x000, 0x020, 0x040, 0x060, 0x080, 0x0A0, 0x0C0,
-            0x0E0, 0x100, 0x120, 0x140, 0x160, 0x180, 0x1A0, 0x1C0, 0x1E0, 0x200, 0x220, 0x240, 0x260,
-            0x280, 0x2A0, 0x2C0, 0x2E0, 0x300, 0x320, 0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0},
-           {0x000, 0x020, 0x040, 0x060, 0x080, 0x0A0, 0x0C0, 0x0E0, 0x100, 0x120, 0x140, 0x160, 0x180,
-            0x1A0, 0x1C0, 0x1E0, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x2E0, 0x300, 0x320,
-            0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0x400, 0x420, 0x440, 0x460, 0x480, 0x4A0, 0x4C0,
-            0x4E0, 0x500, 0x520, 0x540, 0x560, 0x580, 0x5A0, 0x5C0, 0x5E0, 0x600, 0x620, 0x640, 0x660,
-            0x680, 0x6A0, 0x6C0, 0x6E0, 0x700, 0x720, 0x740, 0x760, 0x780, 0x7A0, 0x7C0, 0x7E0},
-           {0x000, 0x020, 0x040, 0x060, 0x080, 0x0A0, 0x0C0, 0x0E0, 0x100, 0x120, 0x140, 0x160, 0x180,
-            0x1A0, 0x1C0, 0x1E0, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x2E0, 0x300, 0x320,
-            0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0x800, 0x820, 0x840, 0x860, 0x880, 0x8A0, 0x8C0,
-            0x8E0, 0x900, 0x920, 0x940, 0x960, 0x980, 0x9A0, 0x9C0, 0x9E0, 0xA00, 0xA20, 0xA40, 0xA60,
-            0xA80, 0xAA0, 0xAC0, 0xAE0, 0xB00, 0xB20, 0xB40, 0xB60, 0xB80, 0xBA0, 0xBC0, 0xBE0}};
-    uint16_t xlookup[2][64] = {
-        {0x000, 0x001, 0x002, 0x003, 0x004, 0x005, 0x006, 0x007, 0x008, 0x009, 0x00A, 0x00B, 0x00C,
-         0x00D, 0x00E, 0x00F, 0x010, 0x011, 0x012, 0x013, 0x014, 0x015, 0x016, 0x017, 0x018, 0x019,
-         0x01A, 0x01B, 0x01C, 0x01D, 0x01E, 0x01F, 0x000, 0x001, 0x002, 0x003, 0x004, 0x005, 0x006,
-         0x007, 0x008, 0x009, 0x00A, 0x00B, 0x00C, 0x00D, 0x00E, 0x00F, 0x010, 0x011, 0x012, 0x013,
-         0x014, 0x015, 0x016, 0x017, 0x018, 0x019, 0x01A, 0x01B, 0x01C, 0x01D, 0x01E, 0x01F},
-        {0x000, 0x001, 0x002, 0x003, 0x004, 0x005, 0x006, 0x007, 0x008, 0x009, 0x00A, 0x00B, 0x00C,
-         0x00D, 0x00E, 0x00F, 0x010, 0x011, 0x012, 0x013, 0x014, 0x015, 0x016, 0x017, 0x018, 0x019,
-         0x01A, 0x01B, 0x01C, 0x01D, 0x01E, 0x01F, 0x400, 0x401, 0x402, 0x403, 0x404, 0x405, 0x406,
-         0x407, 0x408, 0x409, 0x40A, 0x40B, 0x40C, 0x40D, 0x40E, 0x40F, 0x410, 0x411, 0x412, 0x413,
-         0x414, 0x415, 0x416, 0x417, 0x418, 0x419, 0x41A, 0x41B, 0x41C, 0x41D, 0x41E, 0x41F},
-    };
-    int sprsize[8][2] = {{1, 2}, {1, 4}, {1, 8}, {2, 4}, {2, 8}, {4, 8}, {4, 8}, {4, 8}};
 
-  public:
-    uint8_t  screna   = 0;
-    uint8_t  portctrl = 0;
-    uint16_t vramaddr = 0;
-    int      mode     = 0;
-    uint8_t  main = 0, sub = 0;
-    uint16_t palbuffer = 0;
+    uint16_t vramPointer         = 0;
+    bool     vramIncrementOnHigh = false;
+    uint16_t vramIncrement       = 0;
+    uint8_t  vramRemapMode       = 0;
+    uint16_t vramReadBuffer      = 0;
 
-    int      palindex = 0;
-    int      ylatch   = 0;
-    uint32_t matrixr  = 0;
-    uint16_t m7a = 0, m7b = 0, m7c = 0, m7d = 0, m7x = 0, m7y = 0;
-    uint8_t  m7sel      = 0;
-    int      vinc       = 0;
-    int      sprsizeidx = 0;
-    int      spraddr    = 0;
-    uint16_t sprbase    = 0;
-    int      firstread  = 0;
-    int      tilesize   = 0;
-    uint32_t wramaddr   = 0;
-    uint8_t  windena1 = 0, windena2, windena3 = 0;
-    int      w1left = 0, w1right = 0, w2left = 0, w2right = 0;
-    uint8_t  windlogic = 0, windlogic2 = 0;
-    uint8_t  wmaskmain = 0, wmasksub = 0;
-    uint16_t spraddrs = 0;
-    uint8_t  cgadsub = 0, cgwsel = 0;
-    uint16_t fixedcol    = 0;
-    int      mosaic      = 0;
-    uint16_t pri         = 0;
-    int      prirotation = 0;
+    // cgram access
+    uint8_t cgramPointer     = 0;
+    bool    cgramSecondWrite = false;
+    uint8_t cgramBuffer      = 0;
 
-    uint16_t bg[4] = {}, chr[4] = {};
-    int      size[4]    = {};
-    int      xscroll[4] = {}, yscroll[4] = {};
-    uint16_t pal[256] = {};
+    // oam access
 
-    rgb_color fixedc;
+    uint8_t oamAdr           = 0;
+    uint8_t oamAdrWritten    = 0;
+    bool    oamInHigh        = false;
+    bool    oamInHighWritten = false;
+    bool    oamSecondWrite   = false;
+    uint8_t oamBuffer        = 0;
+
+    // object/sprites
+    bool     objPriority = false;
+    uint16_t objTileAdr1 = 0;
+    uint16_t objTileAdr2 = 0;
+    uint8_t  objSize     = 0;
+
+    bool timeOver     = false;
+    bool rangeOver    = false;
+    bool objInterlace = false;
+
+    // background layers
+    uint8_t scrollPrev      = 0;
+    uint8_t scrollPrev2     = 0;
+    uint8_t mosaicSize      = 0;
+    uint8_t mosaicStartLine = 0;
+
+    // mode 7
+    uint8_t m7prev       = 0;
+    bool    m7largeField = false;
+    bool    m7charFill   = false;
+    bool    m7xFlip      = false;
+    bool    m7yFlip      = false;
+    bool    m7extBg      = false;
+
+    // mode 7 internal
+    int32_t m7startX = 0;
+    int32_t m7startY = 0;
+
+    // windows
+    uint8_t window1left  = 0;
+    uint8_t window1right = 0;
+    uint8_t window2left  = 0;
+    uint8_t window2right = 0;
+
+    // color math
+    uint8_t clipMode        = 0;
+    uint8_t preventMathMode = 0;
+    bool    addSubscreen    = false;
+    bool    subtractColor   = false;
+    bool    halfColor       = false;
+    uint8_t fixedColorR     = 0;
+    uint8_t fixedColorG     = 0;
+    uint8_t fixedColorB     = 0;
+
+    // settings
+    bool    forcedBlank    = false;
+    uint8_t brightness     = 0;
+    uint8_t mode           = 0;
+    bool    bg3priority    = false;
+    bool    evenFrame      = false;
+    bool    pseudoHires    = false;
+    bool    overscan       = false;
+    bool    frameOverscan  = false;
+    bool    interlace      = false;
+    bool    frameInterlace = false;
+    bool    directColor    = false;
+
+    // latching
+    uint16_t hCount          = 0;
+    uint16_t vCount          = 0;
+    bool     hCountSecond    = false;
+    bool     vCountSecond    = false;
+    bool     countersLatched = false;
+    uint8_t  ppu1openBus     = 0;
+    uint8_t  ppu2openBus     = 0;
+
 
   public:
-    PPU(SNES *_snes);
+    Ppu(Snes *_snes);
 
-    uint16_t cgadd(uint32_t x, uint32_t y);
-    uint16_t cgaddh(uint32_t x, uint32_t y);
-    uint32_t cgsub(uint32_t x, uint32_t y);
-    uint16_t cgsubh(uint32_t x, uint32_t y);
+    void     ppu_reset();
+    bool     ppu_checkOverscan();
+    void     ppu_handleVblank();
+    void     ppu_runLine(int line);
+    void     ppu_handlePixel(int x, int y);
+    int      ppu_getPixel(int x, int y, bool sub, int *r, int *g, int *b);
+    void     ppu_handleOPT(int layer, int *lx, int *ly);
+    uint16_t ppu_getOffsetValue(int col, int row);
+    int      ppu_getPixelForBgLayer(int x, int y, int layer, bool priority);
+    void     ppu_calculateMode7Starts(int y);
+    int      ppu_getPixelForMode7(int x, int layer, bool priority);
+    bool     ppu_getWindowState(int layer, int x);
+    void     ppu_evaluateSprites(int line);
+    uint16_t ppu_getVramRemap();
+    uint8_t  ppu_read(uint8_t adr);
+    void     ppu_write(uint8_t adr, uint8_t val);
+    void     ppu_putPixels(uint8_t *pixels);
 
-    void initppu();
-    void resetppu();
-    void recalcwindows();
-
-    void     doblit();
-    void     docolour(uint16_t *pw, uint16_t *pw2, uint16_t *pw3, uint16_t *pw4);
-    void     drawline(int line);
-    void     writeppu(uint16_t addr, uint8_t val);
-    uint8_t  doskipper();
-    uint8_t  readppu(uint16_t addr);
-    uint16_t getvramaddr();
-    void     drawchar(int tile, int x, int y, int col);
-    void     window_logic(int windena, int windlogic, uint16_t *w, uint16_t *w2, uint16_t *w3);
+  public:
+    const int layersPerMode[10][12]    = {{4, 0, 1, 4, 0, 1, 4, 2, 3, 4, 2, 3}, {4, 0, 1, 4, 0, 1, 4, 2, 4, 2, 5, 5},
+                                          {4, 0, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5}, {4, 0, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5},
+                                          {4, 0, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5}, {4, 0, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5},
+                                          {4, 0, 4, 4, 0, 4, 5, 5, 5, 5, 5, 5}, {4, 4, 4, 0, 4, 5, 5, 5, 5, 5, 5, 5},
+                                          {2, 4, 0, 1, 4, 0, 1, 4, 4, 2, 5, 5}, {4, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5, 5}};
+    const int prioritysPerMode[10][12] = {{3, 1, 1, 2, 0, 0, 1, 1, 1, 0, 0, 0}, {3, 1, 1, 2, 0, 0, 1, 1, 0, 0, 5, 5},
+                                          {3, 1, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5}, {3, 1, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5},
+                                          {3, 1, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5}, {3, 1, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5},
+                                          {3, 1, 2, 1, 0, 0, 5, 5, 5, 5, 5, 5}, {3, 2, 1, 0, 0, 5, 5, 5, 5, 5, 5, 5},
+                                          {1, 3, 1, 1, 2, 0, 0, 1, 0, 0, 5, 5}, {3, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5, 5}};
+    const int layerCountPerMode[10]    = {12, 10, 8, 8, 8, 8, 6, 5, 10, 7};
+    const int bitDepthsPerMode[10][4]  = {{2, 2, 2, 2}, {4, 4, 2, 5}, {4, 4, 5, 5}, {8, 4, 5, 5}, {8, 2, 5, 5},
+                                          {4, 2, 5, 5}, {4, 5, 5, 5}, {8, 5, 5, 5}, {4, 4, 2, 5}, {8, 7, 5, 5}};
+    const int spriteSizes[8][2]        = {{8, 16}, {8, 32}, {8, 64}, {16, 32}, {16, 64}, {32, 64}, {16, 32}, {16, 32}};
 };
+
+
 #endif

@@ -1,72 +1,120 @@
-#ifndef _SPC_H_
-#define _SPC_H_
-#include "cpu.h"
-#include <cstdint>
+#ifndef SPC_H
+#define SPC_H
 
-class SNES;
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+class Apu;
 class SPC {
-  private:
-    union
-    {
-        uint16_t w;
-        struct
-        {
-            uint8_t a, y;
-        } b;
-    } ya;
+  public:
+    Apu *apu;
 
-    uint8_t  x;
-    uint8_t  sp;
-    uint16_t pc;
+    // registers
+    uint8_t  a  = 0;
+    uint8_t  x  = 0;
+    uint8_t  y  = 0;
+    uint8_t  sp = 0;
+    uint16_t pc = 0;
 
-    struct
-    {
-        int n, v, p, b, h, i, z, c;
-    } p;
+    // flags
+    bool c = false;
+    bool z = false;
+    bool v = false;
+    bool n = false;
+    bool i = false;
+    bool h = false;
+    bool p = false;
+    bool b = false;
+
+    // stopping
+    bool stopped = false;
+
+    // internal use
+    uint8_t cyclesUsed = 0;
 
   public:
-    SNES *snes = nullptr;
-
-    uint8_t *spcram      = nullptr;
-    uint8_t *spcreadhigh = nullptr;
-
-    uint8_t  dspaddr   = 0;
-    double   spccycles = 0;
-    int      dsptotal  = 0;
-    uint16_t spc2 = 0, spc3 = 0;
+    SPC(Apu *_apu);
 
   public:
-    uint8_t spctocpu[4] = {};
-    int     spctimer[3] = {}, spctimer2[3] = {}, spclimit[3] = {};
+    uint8_t spc_read(uint16_t adr);
+    void    spc_write(uint16_t adr, uint8_t val);
 
-    uint8_t spcrom[64] = {0xCD, 0xEF, 0xBD, 0xE8, 0x00, 0xC6, 0x1D, 0xD0, 0xFC, 0x8F, 0xAA, 0xF4, 0x8F,
-                          0xBB, 0xF5, 0x78, 0xCC, 0xF4, 0xD0, 0xFB, 0x2F, 0x19, 0xEB, 0xF4, 0xD0, 0xFC,
-                          0x7E, 0xF4, 0xD0, 0x0B, 0xE4, 0xF5, 0xCB, 0xF4, 0xD7, 0x00, 0xFC, 0xD0, 0xF3,
-                          0xAB, 0x01, 0x10, 0xEF, 0x7E, 0xF4, 0x10, 0xEB, 0xBA, 0xF6, 0xDA, 0x00, 0xBA,
-                          0xF4, 0xC4, 0xF4, 0xDD, 0x5D, 0xD0, 0xDB, 0x1F, 0x00, 0x00, 0xC0, 0xFF};
+    void     spc_reset();
+    int      spc_runOpcode();
+    uint8_t  spc_readOpcode();
+    uint16_t spc_readOpcodeWord();
+    uint8_t  spc_getFlags();
+    void     spc_setFlags(uint8_t val);
+    void     spc_setZN(uint8_t value);
+    void     spc_doBranch(uint8_t value, bool check);
+    uint8_t  spc_pullByte();
+    void     spc_pushByte(uint8_t value);
+    uint16_t spc_pullWord();
+    void     spc_pushWord(uint16_t value);
+    uint16_t spc_readWord(uint16_t adrl, uint16_t adrh);
+    void     spc_writeWord(uint16_t adrl, uint16_t adrh, uint16_t value);
+
+    // adressing modes;
+    uint16_t spc_adrDp();
+    uint16_t spc_adrAbs();
+    uint16_t spc_adrInd();
+    uint16_t spc_adrIdx();
+    uint16_t spc_adrImm();
+    uint16_t spc_adrDpx();
+    uint16_t spc_adrDpy();
+    uint16_t spc_adrAbx();
+    uint16_t spc_adrAby();
+    uint16_t spc_adrIdy();
+    uint16_t spc_adrDpDp(uint16_t *src);
+    uint16_t spc_adrDpImm(uint16_t *src);
+    uint16_t spc_adrIndInd(uint16_t *src);
+    uint8_t  spc_adrAbsBit(uint16_t *adr);
+    uint16_t spc_adrDpWord(uint16_t *low);
+    uint16_t spc_adrIndP();
+
+    // opcode functions;
+    void spc_and(uint16_t adr);
+    void spc_andm(uint16_t dst, uint16_t src);
+    void spc_or(uint16_t adr);
+    void spc_orm(uint16_t dst, uint16_t src);
+    void spc_eor(uint16_t adr);
+    void spc_eorm(uint16_t dst, uint16_t src);
+    void spc_adc(uint16_t adr);
+    void spc_adcm(uint16_t dst, uint16_t src);
+    void spc_sbc(uint16_t adr);
+    void spc_sbcm(uint16_t dst, uint16_t src);
+    void spc_cmp(uint16_t adr);
+    void spc_cmpx(uint16_t adr);
+    void spc_cmpy(uint16_t adr);
+    void spc_cmpm(uint16_t dst, uint16_t src);
+    void spc_mov(uint16_t adr);
+    void spc_movx(uint16_t adr);
+    void spc_movy(uint16_t adr);
+    void spc_movs(uint16_t adr);
+    void spc_movsx(uint16_t adr);
+    void spc_movsy(uint16_t adr);
+    void spc_asl(uint16_t adr);
+    void spc_lsr(uint16_t adr);
+    void spc_rol(uint16_t adr);
+    void spc_ror(uint16_t adr);
+    void spc_inc(uint16_t adr);
+    void spc_dec(uint16_t adr);
+
+    void spc_doOpcode(uint8_t opcode);
 
   public:
-    SPC(SNES *_snes);
-
-    uint8_t  readfromspc(uint16_t addr);
-    void     writetospc(uint16_t addr, uint8_t val);
-    void     writespcregs(uint16_t a, uint8_t v);
-    uint16_t getspcpc();
-    uint8_t  readspcregs(uint16_t a);
-
-    void initspc();
-    void resetspc();
-    void execspc();
-
-    void    getdp(uint16_t *addr);
-    void    getdpx(uint16_t *addr);
-    void    getdpy(uint16_t *addr);
-    void    getabs(uint16_t *addr);
-    void    setspczn(uint8_t v);
-    void    setspczn16(uint16_t v);
-    uint8_t readspc(uint16_t a);
-    void    writespc(uint16_t a, uint8_t v);
-    void    ADC(uint8_t *ac, uint8_t temp, uint16_t *tempw);
-    void    SBC(uint8_t *ac, uint8_t temp, uint16_t *tempw);
+    const int cyclesPerOpcode[256] = {
+        2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 5,  4, 5, 4, 6, 8, 2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 6, 5, 2, 2, 4, 6, 2, 8, 4, 5, 3,
+        4, 3, 6, 2, 6, 5, 4, 5, 4, 5, 4,  2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 6, 5, 2, 2, 3, 8, 2, 8, 4, 5, 3, 4, 3, 6, 2, 6,
+        4, 4, 5, 4, 6, 6, 2, 8, 4, 5, 4,  5, 5, 6, 5, 5, 4, 5, 2, 2, 4, 3, 2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 4, 4, 5, 4, 5,
+        5, 2, 8, 4, 5, 4, 5, 5, 6, 5, 5,  5, 5, 2, 2, 3, 6, 2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 5, 4, 5, 2, 4, 5, 2, 8, 4, 5,
+        4, 5, 5, 6, 5, 5, 5, 5, 2, 2, 12, 5, 2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 4, 4, 5, 2, 4, 4, 2, 8, 4, 5, 4, 5, 5, 6, 5,
+        5, 5, 5, 2, 2, 3, 4, 2, 8, 4, 5,  4, 5, 4, 7, 2, 5, 6, 4, 5, 2, 4, 9, 2, 8, 4, 5, 5, 6, 6, 7, 4, 5, 5, 5, 2, 2,
+        6, 3, 2, 8, 4, 5, 3, 4, 3, 6, 2,  4, 5, 3, 4, 3, 4, 3, 2, 8, 4, 5, 4, 5, 5, 6, 3, 4, 5, 4, 2, 2, 4, 3};
 };
+
+
 #endif

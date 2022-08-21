@@ -12,15 +12,7 @@ https://user-images.githubusercontent.com/10168979/185751997-7e56e383-df57-40ac-
 
 <br><br>
 
-<pre>
-linux
-Bundling allegro
-</pre>
-
-<pre>
-windows
-Requires allegro 4.2
-</pre>
+Requires SDL2
 
 <br><br><br>
 
@@ -58,3 +50,4 @@ Build
 debug
 
 <br><br><br><br><br><br><br><br><br><br>
+
