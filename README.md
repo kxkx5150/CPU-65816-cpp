@@ -6,13 +6,13 @@
 
 ## SNES (スーパーファミコン)
 
-
 https://user-images.githubusercontent.com/10168979/185751997-7e56e383-df57-40ac-be18-7e094c320937.mp4
-
 
 <br><br>
 
+<pre>
 Requires SDL2
+</pre>
 
 <br><br><br>
 
@@ -50,4 +50,3 @@ Build
 debug
 
 <br><br><br><br><br><br><br><br><br><br>
-
