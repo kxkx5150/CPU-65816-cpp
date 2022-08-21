@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <unistd.h>
 #include "cart.h"
 #include "snes.h"
 
@@ -245,7 +246,14 @@ void Cart::cart_writeHirom(uint8_t bank, uint16_t adr, uint8_t val)
 bool Cart::loadRom(const char *name, Snes *snes)
 {
     size_t length = 0;
-    FILE  *f      = fopen(name, "rb");
+    FILE  *f;
+
+    if (access(name, 0) == 0) {
+        f = fopen(name, "rb");
+    } else {
+        f = fopen("Sword World SFC (J).smc", "rb");
+    }
+
     fseek(f, 0, SEEK_END);
     length = ftell(f);
     rewind(f);

@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/exe/cpp_app",
-            "args": [""],
+            "args": ["rom/ch.smc"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

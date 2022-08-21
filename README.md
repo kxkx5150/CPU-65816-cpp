@@ -14,8 +14,6 @@ https://user-images.githubusercontent.com/10168979/185751997-7e56e383-df57-40ac-
 Requires SDL2
 </pre>
 
-<br><br><br>
-
 <br><br><br><br><br><br>
 
 vscode extensions
