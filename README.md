@@ -1,22 +1,23 @@
 # CPU-65816-cpp
 
+## SNES (スーパーファミコン)
+
+<br>
+
 ### WIP
 
 <br>
 
-## SNES (スーパーファミコン)
-
-https://user-images.githubusercontent.com/10168979/185751997-7e56e383-df57-40ac-be18-7e094c320937.mp4
-
-use SnesJs as a reference
-
-<br><br>
-
 <pre>
-Requires SDL2
+Ubuntu 22.04
 </pre>
 
-<br><br><br>
+<br>
+
+<br>
+
+use snes9x-1.61 as a reference
+
 <br><br><br><br><br><br>
 
 vscode extensions
@@ -32,11 +33,6 @@ vscode extensions
     IntelliCode
     clangd
 </pre>
-
-<br><br><br>
-
-(Ctrl + Shift + p)  
-CMake: Configure
 
 <br><br><br>
 

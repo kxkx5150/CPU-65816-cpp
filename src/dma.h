@@ -1,57 +1,48 @@
-#ifndef DMA_H
-#define DMA_H
-#include <stdint.h>
 
-typedef struct DmaChannel
-{
-    uint8_t  bAdr       = 0;
-    uint16_t aAdr       = 0;
-    uint8_t  aBank      = 0;
-    uint16_t size       = 0;    // also indirect hdma adr
-    uint8_t  indBank    = 0;    // hdma
-    uint16_t tableAdr   = 0;    // hdma
-    uint8_t  repCount   = 0;    // hdma
-    uint8_t  unusedByte = 0;
-    uint8_t  mode       = 0;
-    uint8_t  offIndex   = 0;
+#ifndef _DMA_H_
+#define _DMA_H_
+#include "utils/port.h"
 
-    bool dmaActive  = false;
-    bool hdmaActive = false;
-    bool fixed      = false;
-    bool decrement  = false;
-    bool indirect   = false;    // hdma
-    bool fromB      = false;
-    bool unusedBit  = false;
-    bool doTransfer = false;    // hdma
-    bool terminated = false;    // hdma
-} DmaChannel;
-
-class Snes;
-class Dma {
+class SDMA {
   public:
-    Snes *snes = nullptr;
+    bool8  ReverseTransfer;
+    bool8  HDMAIndirectAddressing;
+    bool8  UnusedBit43x0;
+    bool8  AAddressFixed;
+    bool8  AAddressDecrement;
+    uint8  TransferMode;
+    uint8  BAddress;
+    uint16 AAddress;
+    uint8  ABank;
+    uint16 DMACount_Or_HDMAIndirectAddress;
+    uint8  IndirectBank;
+    uint16 Address;
+    uint8  Repeat;
+    uint8  LineCount;
+    uint8  UnknownByte;
+    uint8  DoTransfer;
+};
 
-    DmaChannel channel[8] = {};
-    uint16_t   hdmaTimer  = 0;
-    uint32_t   dmaTimer   = 0;
-    bool       dmaBusy    = false;
+class SNESX;
+class SDMAS {
+  private:
+    uint8 sdd1_decode_buffer[0x10000];
+    int   HDMA_ModeByteCounts[8] = {1, 2, 2, 4, 4, 4, 2, 4};
 
   public:
-    Dma(Snes *_snes);
+    SNESX *snes = nullptr;
 
-    void    dma_reset();
-    uint8_t dma_read(uint16_t adr);
-    void    dma_write(uint16_t adr, uint8_t val);
-    void    dma_doDma();
-    void    dma_initHdma();
-    void    dma_doHdma();
-    void    dma_transferByte(uint16_t aAdr, uint8_t aBank, uint8_t bAdr, bool fromB);
-    bool    dma_cycle();
-    void    dma_startDma(uint8_t val, bool hdma);
+    SDMA   DMA[8];
+    uint8 *HDMAMemPointers[8];
 
   public:
-    const int bAdrOffsets[8][4] = {{0, 0, 0, 0}, {0, 1, 0, 1}, {0, 0, 0, 0}, {0, 0, 1, 1},
-                                   {0, 1, 2, 3}, {0, 1, 0, 1}, {0, 0, 0, 0}, {0, 0, 1, 1}};
-    const int transferLength[8] = {1, 2, 2, 4, 4, 4, 2, 4};
+    SDMAS(SNESX *_snes);
+
+    bool8 addCyclesInDMA(uint8 dma_channel);
+    bool8 S9xDoDMA(uint8 Channel);
+    bool8 HDMAReadLineCount(int d);
+    void  S9xStartHDMA(void);
+    uint8 S9xDoHDMA(uint8 byte);
+    void  S9xResetDMA(void);
 };
 #endif

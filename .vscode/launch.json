@@ -8,14 +8,14 @@
             "name": "(gdb) 起動",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/exe/cpp_app",
+            "program": "${workspaceFolder}/src/snes",
             "args": ["rom/ch.smc"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "preLaunchTask": "CMake Build",
+            "preLaunchTask": "make",
             "miDebuggerPath": "gdb",
             "setupCommands": [
                 {

@@ -1,500 +1,435 @@
-#include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <signal.h>
+#include <errno.h>
 #include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include "cart.h"
-#include "input.h"
+#include <algorithm>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+
 #include "snes.h"
-#include "spc.h"
+#include "cpu.h"
+#include "apu/apu.h"
+#include "snes.h"
+#include "mem.h"
+#include "dma.h"
+#include "apu/apu.h"
+#include "ppu.h"
+
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+static const char *sound_device = NULL;
+static char        default_dir[PATH_MAX + 1];
+static const char *s9x_base_dir = NULL, *rom_filename = NULL, *snapshot_filename = NULL, *play_smv_filename = NULL,
+                  *record_smv_filename = NULL;
+//
+struct SMSU1          MSU1;
+struct SMulti         Multi;
+struct SSettings      Settings;
+struct STimings       Timings;
+struct SSNESGameFixes SNESGameFixes;
+struct SUnixSettings  unixSettings;
+struct SoundStatus    so;
+SNESX                *g_snes = nullptr;
 
 
-Snes::Snes()
+SNESX::SNESX()
 {
-    cpu    = new CPU(this);
-    dma    = new Dma(this);
-    cart   = new Cart(this);
-    apu    = new Apu(this);
-    input1 = new Input(this);
-    input2 = new Input(this);
-    ppu    = new Ppu(this);
+    m_MSU1          = &MSU1;
+    m_Multi         = &Multi;
+    m_Settings      = &Settings;
+    m_Timings       = &Timings;
+    m_SNESGameFixes = &SNESGameFixes;
+    m_unixSettings  = &unixSettings;
+    m_so            = &so;
+
+    scpu     = new SCPUState(this);
+    dma      = new SDMAS(this);
+    mem      = new CMemory(this);
+    ppu      = new SPPU(this);
+    renderer = new Renderer(this);
 }
-Snes::~Snes()
+SNESX::~SNESX()
 {
-    delete cpu;
+    delete scpu;
     delete dma;
-    delete cart;
-    delete apu;
-    delete input1;
-    delete input2;
+    delete mem;
     delete ppu;
+    delete renderer;
 }
-void Snes::snes_reset(bool hard)
+void S9xCB(void *data)
 {
-    cart->cart_reset();
-    cpu->cpu_reset();
-    apu->apu_reset();
-    dma->dma_reset();
-    ppu->ppu_reset();
-    input1->input_reset();
-    input2->input_reset();
-
-    if (hard)
-        memset(ram, 0, sizeof(ram));
-
-    ramAdr           = 0;
-    hPos             = 0;
-    vPos             = 0;
-    frames           = 0;
-    cpuCyclesLeft    = 52;
-    cpuMemOps        = 0;
-    apuCatchupCycles = 0.0;
-    hIrqEnabled      = false;
-    vIrqEnabled      = false;
-    nmiEnabled       = false;
-    hTimer           = 0x1ff;
-    vTimer           = 0x1ff;
-    inNmi            = false;
-    inIrq            = false;
-    inVblank         = false;
-
-    memset(portAutoRead, 0, sizeof(portAutoRead));
-
-    autoJoyRead    = false;
-    autoJoyTimer   = 0;
-    ppuLatch       = false;
-    multiplyA      = 0xff;
-    multiplyResult = 0xfe01;
-    divideA        = 0xffff;
-    divideResult   = 0x101;
-    fastMem        = false;
-    openBus        = 0;
+    g_snes->S9xSamplesAvailable(data);
 }
-void Snes::snes_runFrame()
+const char *SNESX::S9xGetDirectory(enum s9x_getdirtype dirtype)
 {
-    do {
-        snes_runCycle();
-    } while (!(hPos == 0 && vPos == 0));
-}
-void Snes::snes_runCycle()
-{
-    apuCatchupCycles += apuCyclesPerMaster * 2.0;
-    input1->input_cycle();
-    input2->input_cycle();
+    static char s[PATH_MAX + 1];
+    switch (dirtype) {
+        case DEFAULT_DIR:
+            strncpy(s, s9x_base_dir, PATH_MAX + 1);
+            s[PATH_MAX] = 0;
+            break;
+        case HOME_DIR:
+            strncpy(s, getenv("HOME"), PATH_MAX + 1);
+            s[PATH_MAX] = 0;
+            break;
+        case ROMFILENAME_DIR: {
 
-    if (hPos < 536 || hPos >= 576) {
-        if (!dma->dma_cycle()) {
-            snes_runCpu();
-        }
-    }
-
-    if (vIrqEnabled && hIrqEnabled) {
-        if (vPos == vTimer && hPos == (4 * hTimer)) {
-            inIrq          = true;
-            cpu->irqWanted = true;
-        }
-    } else if (vIrqEnabled && !hIrqEnabled) {
-        if (vPos == vTimer && hPos == 0) {
-            inIrq          = true;
-            cpu->irqWanted = true;
-        }
-    } else if (!vIrqEnabled && hIrqEnabled) {
-        if (hPos == (4 * hTimer)) {
-            inIrq          = true;
-            cpu->irqWanted = true;
-        }
-    }
-
-    if (hPos == 0) {
-        bool startingVblank = false;
-        if (vPos == 0) {
-            inVblank = false;
-            inNmi    = false;
-            dma->dma_initHdma();
-        } else if (vPos == 225) {
-            startingVblank = !ppu->ppu_checkOverscan();
-        } else if (vPos == 240) {
-            if (!inVblank)
-                startingVblank = true;
-        }
-
-        if (startingVblank) {
-            ppu->ppu_handleVblank();
-            inVblank = true;
-            inNmi    = true;
-            if (autoJoyRead) {
-                autoJoyTimer = 4224;
-                snes_doAutoJoypad();
+            strncpy(s, mem->ROMFilename, PATH_MAX + 1);
+            s[PATH_MAX] = 0;
+            for (int i = strlen(s); i >= 0; i--) {
+                if (s[i] == SLASH_CHAR) {
+                    s[i] = 0;
+                    break;
+                }
             }
-            if (nmiEnabled) {
-                cpu->nmiWanted = true;
-            }
-        }
-    } else if (hPos == 512) {
-        if (!inVblank)
-            ppu->ppu_runLine(vPos);
-    } else if (hPos == 1024) {
-        if (!inVblank)
-            dma->dma_doHdma();
+        } break;
+        default:
+            s[0] = 0;
+            break;
     }
-    if (autoJoyTimer > 0)
-        autoJoyTimer -= 2;
-
-    hPos += 2;
-
-    if (hPos == 1364) {
-        hPos = 0;
-        vPos++;
-
-        if (vPos == 262) {
-            vPos = 0;
-            frames++;
-            snes_catchupApu();
-        }
-    }
+    return (s);
 }
-void Snes::snes_runCpu()
+const char *SNESX::S9xGetFilename(const char *ex, enum s9x_getdirtype dirtype)
 {
-    if (cpuCyclesLeft == 0) {
-        cpuMemOps  = 0;
-        int cycles = cpu->cpu_runOpcode();
-        cpuCyclesLeft += (cycles - cpuMemOps) * 6;
-    }
-
-    cpuCyclesLeft -= 2;
+    static char s[PATH_MAX + 1];
+    char        drive[_MAX_DRIVE + 1], dir[_MAX_DIR + 1], fname[_MAX_FNAME + 1], ext[_MAX_EXT + 1];
+    _splitpath(mem->ROMFilename, drive, dir, fname, ext);
+    snprintf(s, PATH_MAX + 1, "%s%s%s%s", S9xGetDirectory(dirtype), SLASH_STR, fname, ex);
+    return (s);
 }
-void Snes::snes_catchupApu()
+bool8 SNESX::S9xInitUpdate(void)
 {
-    int catchupCycles = (int)apuCatchupCycles;
-    for (int i = 0; i < catchupCycles; i++) {
-        apu->apu_cycle();
-    }
-
-    apuCatchupCycles -= (double)catchupCycles;
+    return (TRUE);
 }
-void Snes::snes_doAutoJoypad()
+bool8 SNESX::S9xDeinitUpdate(int width, int height)
 {
-    memset(portAutoRead, 0, sizeof(portAutoRead));
-    input1->latchLine = true;
-    input2->latchLine = true;
-    input1->input_cycle();
-    input1->input_cycle();
-    input1->latchLine = false;
-    input2->latchLine = false;
-
-    for (int i = 0; i < 16; i++) {
-        uint8_t val = input1->input_read();
-        portAutoRead[0] |= ((val & 1) << (15 - i));
-        portAutoRead[2] |= (((val >> 1) & 1) << (15 - i));
-        val = input2->input_read();
-        portAutoRead[1] |= ((val & 1) << (15 - i));
-        portAutoRead[3] |= (((val >> 1) & 1) << (15 - i));
-    }
+    S9xPutImage(width, height);
+    return (TRUE);
 }
-uint8_t Snes::snes_readBBus(uint8_t adr)
+void SNESX::S9xAutoSaveSRAM(void)
 {
-    if (adr < 0x40) {
-        return ppu->ppu_read(adr);
-    }
-
-    if (adr < 0x80) {
-        snes_catchupApu();
-        return apu->outPorts[adr & 0x3];
-    }
-
-    if (adr == 0x80) {
-        uint8_t ret = ram[ramAdr++];
-        ramAdr &= 0x1ffff;
-        return ret;
-    }
-
-    return openBus;
+    mem->SaveSRAM(S9xGetFilename(".srm", SRAM_DIR));
 }
-void Snes::snes_writeBBus(uint8_t adr, uint8_t val)
+void SNESX::S9xSyncSpeed(void)
 {
-    if (adr < 0x40) {
-        ppu->ppu_write(adr, val);
+    if (Settings.SoundSync) {
         return;
     }
-
-    if (adr < 0x80) {
-        snes_catchupApu();
-        apu->inPorts[adr & 0x3] = val;
+    if (Settings.DumpStreams)
+        return;
+    if (Settings.HighSpeedSeek > 0)
+        Settings.HighSpeedSeek--;
+    if (Settings.TurboMode) {
+        if ((++ppu->IPPU.FrameSkip >= Settings.TurboSkipFrames) && !Settings.HighSpeedSeek) {
+            ppu->IPPU.FrameSkip       = 0;
+            ppu->IPPU.SkippedFrames   = 0;
+            ppu->IPPU.RenderThisFrame = TRUE;
+        } else {
+            ppu->IPPU.SkippedFrames++;
+            ppu->IPPU.RenderThisFrame = FALSE;
+        }
         return;
     }
-
-    switch (adr) {
-        case 0x80: {
-            ram[ramAdr++] = val;
-            ramAdr &= 0x1ffff;
-            break;
-        }
-        case 0x81: {
-            ramAdr = (ramAdr & 0x1ff00) | val;
-            break;
-        }
-        case 0x82: {
-            ramAdr = (ramAdr & 0x100ff) | (val << 8);
-            break;
-        }
-        case 0x83: {
-            ramAdr = (ramAdr & 0x0ffff) | ((val & 1) << 16);
-            break;
-        }
+    static struct timeval next1 = {0, 0};
+    struct timeval        now;
+    while (gettimeofday(&now, NULL) == -1)
+        ;
+    if (next1.tv_sec == 0) {
+        next1 = now;
+        next1.tv_usec++;
     }
-}
-uint8_t Snes::snes_readReg(uint16_t adr)
-{
-    switch (adr) {
-        case 0x4210: {
-            uint8_t val = 0x2;
-            val |= inNmi << 7;
-            inNmi = false;
-            return val | (openBus & 0x70);
-        }
-        case 0x4211: {
-            uint8_t val    = inIrq << 7;
-            inIrq          = false;
-            cpu->irqWanted = false;
-            return val | (openBus & 0x7f);
-        }
-        case 0x4212: {
-            uint8_t val = (autoJoyTimer > 0);
-            val |= (hPos >= 1024) << 6;
-            val |= inVblank << 7;
-            return val | (openBus & 0x3e);
-        }
-        case 0x4213: {
-            return ppuLatch << 7;
-        }
-        case 0x4214: {
-            return divideResult & 0xff;
-        }
-        case 0x4215: {
-            return divideResult >> 8;
-        }
-        case 0x4216: {
-            return multiplyResult & 0xff;
-        }
-        case 0x4217: {
-            return multiplyResult >> 8;
-        }
-        case 0x4218:
-        case 0x421a:
-        case 0x421c:
-        case 0x421e: {
-            return portAutoRead[(adr - 0x4218) / 2] & 0xff;
-        }
-        case 0x4219:
-        case 0x421b:
-        case 0x421d:
-        case 0x421f: {
-            return portAutoRead[(adr - 0x4219) / 2] >> 8;
-        }
-        default: {
-            return openBus;
-        }
-    }
-}
-void Snes::snes_writeReg(uint16_t adr, uint8_t val)
-{
-    switch (adr) {
-        case 0x4200: {
-            autoJoyRead = val & 0x1;
-            if (!autoJoyRead)
-                autoJoyTimer = 0;
-            hIrqEnabled = val & 0x10;
-            vIrqEnabled = val & 0x20;
-            nmiEnabled  = val & 0x80;
-            if (!hIrqEnabled && !vIrqEnabled) {
-                inIrq          = false;
-                cpu->irqWanted = false;
+    unsigned limit =
+        (Settings.SkipFrames == AUTO_FRAMERATE) ? (timercmp(&next1, &now, <) ? 10 : 1) : Settings.SkipFrames;
+    ppu->IPPU.RenderThisFrame = (++ppu->IPPU.SkippedFrames >= limit) ? TRUE : FALSE;
+    if (ppu->IPPU.RenderThisFrame)
+        ppu->IPPU.SkippedFrames = 0;
+    else {
+        if (timercmp(&next1, &now, <)) {
+            unsigned lag = (now.tv_sec - next1.tv_sec) * 1000000 + now.tv_usec - next1.tv_usec;
+            if (lag >= 500000) {
+                next1 = now;
             }
-            break;
         }
-        case 0x4201: {
-            if (!(val & 0x80) && ppuLatch) {
-                ppu->ppu_read(0x37);
+    }
+    while (timercmp(&next1, &now, >)) {
+        unsigned timeleft = (next1.tv_sec - now.tv_sec) * 1000000 + next1.tv_usec - now.tv_usec;
+        usleep(timeleft);
+        while (gettimeofday(&now, NULL) == -1)
+            ;
+    }
+    next1.tv_usec += Settings.FrameTime;
+    if (next1.tv_usec >= 1000000) {
+        next1.tv_sec += next1.tv_usec / 1000000;
+        next1.tv_usec %= 1000000;
+    }
+}
+void SNESX::S9xSamplesAvailable(void *data)
+{
+    int               samples_to_write;
+    static uint8     *sound_buffer      = NULL;
+    static int        sound_buffer_size = 0;
+    snd_pcm_sframes_t frames_written, frames;
+    frames = snd_pcm_avail(so.pcm_handle);
+    if (frames < 0) {
+        frames = snd_pcm_recover(so.pcm_handle, frames, 1);
+        return;
+    }
+    if (Settings.DynamicRateControl) {
+        S9xUpdateDynamicRate(snd_pcm_frames_to_bytes(so.pcm_handle, frames), so.output_buffer_size);
+    }
+    samples_to_write = S9xGetSampleCount();
+    if (samples_to_write < 0)
+        return;
+    if (Settings.DynamicRateControl && !Settings.SoundSync) {
+        if (frames < samples_to_write / 2) {
+            S9xClearSamples();
+            return;
+        }
+    }
+    if (Settings.SoundSync && !Settings.TurboMode && !Settings.Mute) {
+        snd_pcm_nonblock(so.pcm_handle, 0);
+        frames = samples_to_write / 2;
+    } else {
+        snd_pcm_nonblock(so.pcm_handle, 1);
+        frames = MIN(frames, samples_to_write / 2);
+    }
+    int bytes = snd_pcm_frames_to_bytes(so.pcm_handle, frames);
+    if (bytes <= 0)
+        return;
+    if (sound_buffer_size < bytes || sound_buffer == NULL) {
+        sound_buffer      = (uint8 *)realloc(sound_buffer, bytes);
+        sound_buffer_size = bytes;
+    }
+    S9xMixSamples(sound_buffer, frames * 2);
+    frames_written = 0;
+    while (frames_written < frames) {
+        int result;
+        result = snd_pcm_writei(so.pcm_handle, sound_buffer + snd_pcm_frames_to_bytes(so.pcm_handle, frames_written),
+                                frames - frames_written);
+        if (result < 0) {
+            result = snd_pcm_recover(so.pcm_handle, result, 1);
+            if (result < 0) {
+                break;
             }
-            ppuLatch = val & 0x80;
-            break;
-        }
-        case 0x4202: {
-            multiplyA = val;
-            break;
-        }
-        case 0x4203: {
-            multiplyResult = multiplyA * val;
-            break;
-        }
-        case 0x4204: {
-            divideA = (divideA & 0xff00) | val;
-            break;
-        }
-        case 0x4205: {
-            divideA = (divideA & 0x00ff) | (val << 8);
-            break;
-        }
-        case 0x4206: {
-            if (val == 0) {
-                divideResult   = 0xffff;
-                multiplyResult = divideA;
-            } else {
-                divideResult   = divideA / val;
-                multiplyResult = divideA % val;
-            }
-            break;
-        }
-        case 0x4207: {
-            hTimer = (hTimer & 0x100) | val;
-            break;
-        }
-        case 0x4208: {
-            hTimer = (hTimer & 0x0ff) | ((val & 1) << 8);
-            break;
-        }
-        case 0x4209: {
-            vTimer = (vTimer & 0x100) | val;
-            break;
-        }
-        case 0x420a: {
-            vTimer = (vTimer & 0x0ff) | ((val & 1) << 8);
-            break;
-        }
-        case 0x420b: {
-            dma->dma_startDma(val, false);
-            break;
-        }
-        case 0x420c: {
-            dma->dma_startDma(val, true);
-            break;
-        }
-        case 0x420d: {
-            fastMem = val & 0x1;
-            break;
-        }
-        default: {
-            break;
+        } else {
+            frames_written += result;
         }
     }
 }
-uint8_t Snes::snes_rread(uint32_t adr)
+bool8 SNESX::S9xOpenSoundDevice(void)
 {
-    uint8_t bank = adr >> 16;
-    adr &= 0xffff;
-
-    if (bank == 0x7e || bank == 0x7f) {
-        return ram[((bank & 1) << 16) | adr];
+    int                  err;
+    unsigned int         periods     = 8;
+    unsigned int         buffer_size = unixSettings.SoundBufferSize * 1000;
+    snd_pcm_sw_params_t *sw_params;
+    snd_pcm_hw_params_t *hw_params;
+    snd_pcm_uframes_t    alsa_buffer_size, alsa_period_size;
+    unsigned int         min  = 0;
+    unsigned int         max  = 0;
+    unsigned int         rate = Settings.SoundPlaybackRate;
+    err                       = snd_pcm_open(&so.pcm_handle, sound_device, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+    if (err < 0) {
+        printf("Failed: %s\n", snd_strerror(err));
+        return (FALSE);
     }
-
-    if (bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) {
-        if (adr < 0x2000) {
-            return ram[adr];
-        }
-        if (adr >= 0x2100 && adr < 0x2200) {
-            return snes_readBBus(adr & 0xff);
-        }
-        if (adr == 0x4016) {
-            return input1->input_read() | (openBus & 0xfc);
-        }
-        if (adr == 0x4017) {
-            return input2->input_read() | (openBus & 0xe0) | 0x1c;
-        }
-        if (adr >= 0x4200 && adr < 0x4220) {
-            return snes_readReg(adr);
-        }
-        if (adr >= 0x4300 && adr < 0x4380) {
-            return dma->dma_read(adr);
-        }
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(so.pcm_handle, hw_params);
+    snd_pcm_hw_params_set_format(so.pcm_handle, hw_params, SND_PCM_FORMAT_S16);
+    snd_pcm_hw_params_set_access(so.pcm_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_rate_resample(so.pcm_handle, hw_params, 0);
+    snd_pcm_hw_params_set_channels(so.pcm_handle, hw_params, 2);
+    snd_pcm_hw_params_get_rate_min(hw_params, &min, NULL);
+    snd_pcm_hw_params_get_rate_max(hw_params, &max, NULL);
+    fprintf(stderr, "Alsa available rates: %d to %d\n", min, max);
+    if (rate > max && rate < min) {
+        fprintf(stderr, "Rate %d not available. Using %d instead.\n", rate, max);
+        rate = max;
     }
-
-    return cart->cart_read(bank, adr);
+    snd_pcm_hw_params_set_rate_near(so.pcm_handle, hw_params, &rate, NULL);
+    snd_pcm_hw_params_get_buffer_time_min(hw_params, &min, NULL);
+    snd_pcm_hw_params_get_buffer_time_max(hw_params, &max, NULL);
+    fprintf(stderr, "Alsa available buffer sizes: %dms to %dms\n", min / 1000, max / 1000);
+    if (buffer_size < min && buffer_size > max) {
+        fprintf(stderr, "Buffer size %dms not available. Using %d instead.\n", buffer_size / 1000, (min + max) / 2000);
+        buffer_size = (min + max) / 2;
+    }
+    snd_pcm_hw_params_set_buffer_time_near(so.pcm_handle, hw_params, &buffer_size, NULL);
+    snd_pcm_hw_params_get_periods_min(hw_params, &min, NULL);
+    snd_pcm_hw_params_get_periods_max(hw_params, &max, NULL);
+    fprintf(stderr, "Alsa period ranges: %d to %d blocks\n", min, max);
+    if (periods > max)
+        periods = max;
+    snd_pcm_hw_params_set_periods_near(so.pcm_handle, hw_params, &periods, NULL);
+    err = snd_pcm_hw_params(so.pcm_handle, hw_params);
+    if (err < 0) {
+        fprintf(stderr, "Alsa error: unable to install hw params\n");
+        snd_pcm_drain(so.pcm_handle);
+        snd_pcm_close(so.pcm_handle);
+        so.pcm_handle = NULL;
+        return (FALSE);
+    }
+    snd_pcm_sw_params_alloca(&sw_params);
+    snd_pcm_sw_params_current(so.pcm_handle, sw_params);
+    snd_pcm_get_params(so.pcm_handle, &alsa_buffer_size, &alsa_period_size);
+    snd_pcm_sw_params_set_start_threshold(so.pcm_handle, sw_params, (alsa_buffer_size / 2));
+    err = snd_pcm_sw_params(so.pcm_handle, sw_params);
+    if (err < 0) {
+        fprintf(stderr, "Alsa error: unable to install sw params\n");
+        snd_pcm_drain(so.pcm_handle);
+        snd_pcm_close(so.pcm_handle);
+        so.pcm_handle = NULL;
+        return (FALSE);
+    }
+    err = snd_pcm_prepare(so.pcm_handle);
+    if (err < 0) {
+        fprintf(stderr, "Alsa error: unable to prepare audio: %s\n", snd_strerror(err));
+        snd_pcm_drain(so.pcm_handle);
+        snd_pcm_close(so.pcm_handle);
+        so.pcm_handle = NULL;
+        return (FALSE);
+    }
+    so.output_buffer_size = snd_pcm_frames_to_bytes(so.pcm_handle, alsa_buffer_size);
+    S9xSetSamplesAvailableCallback(S9xCB, NULL);
+    return (TRUE);
 }
-void Snes::snes_write(uint32_t adr, uint8_t val)
+void SNESX::S9xExit(void)
 {
-    openBus      = val;
-    uint8_t bank = adr >> 16;
-    adr &= 0xffff;
-
-    if (bank == 0x7e || bank == 0x7f) {
-        ram[((bank & 1) << 16) | adr] = val;
-    }
-
-    if (bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) {
-        if (adr < 0x2000) {
-            ram[adr] = val;
-        }
-
-        if (adr >= 0x2100 && adr < 0x2200) {
-            snes_writeBBus(adr & 0xff, val);
-        }
-
-        if (adr == 0x4016) {
-            input1->latchLine = val & 1;
-            input2->latchLine = val & 1;
-        }
-
-        if (adr >= 0x4200 && adr < 0x4220) {
-            snes_writeReg(adr, val);
-        }
-
-        if (adr >= 0x4300 && adr < 0x4380) {
-            dma->dma_write(adr, val);
-        }
-    }
-
-    cart->cart_write(bank, adr, val);
+    S9xSetSoundMute(TRUE);
+    Settings.StopEmulation = TRUE;
+    mem->SaveSRAM(S9xGetFilename(".srm", SRAM_DIR));
+    S9xDeinitDisplay();
+    mem->Deinit();
+    S9xDeinitAPU();
+    exit(0);
 }
-int Snes::snes_getAccessTime(uint32_t adr)
+void SNESX::S9xinit(int argc, char **argv)
 {
-    uint8_t bank = adr >> 16;
-    adr &= 0xffff;
+    rom_filename = argv[1];
 
-    if (bank >= 0x40 && bank < 0x80) {
-        return 8;
+    s9x_base_dir = default_dir;
+    memset(&Settings, 0, sizeof(Settings));
+    Settings.MouseMaster                  = TRUE;
+    Settings.SuperScopeMaster             = TRUE;
+    Settings.JustifierMaster              = TRUE;
+    Settings.MultiPlayer5Master           = TRUE;
+    Settings.FrameTimePAL                 = 20000;
+    Settings.FrameTimeNTSC                = 16667;
+    Settings.SixteenBitSound              = TRUE;
+    Settings.Stereo                       = TRUE;
+    Settings.SoundPlaybackRate            = 48000;
+    Settings.SoundInputRate               = 31950;
+    Settings.Transparency                 = TRUE;
+    Settings.AutoDisplayMessages          = TRUE;
+    Settings.InitialInfoStringTimeout     = 120;
+    Settings.HDMATimingHack               = 100;
+    Settings.BlockInvalidVRAMAccessMaster = TRUE;
+    Settings.StopEmulation                = TRUE;
+    Settings.WrongMovieStateProtection    = TRUE;
+    Settings.DumpStreamsMaxFrames         = -1;
+    Settings.StretchScreenshots           = 1;
+    Settings.SnapshotScreenshots          = TRUE;
+    Settings.SkipFrames                   = AUTO_FRAMERATE;
+    Settings.TurboSkipFrames              = 15;
+    Settings.CartAName[0]                 = 0;
+    Settings.CartBName[0]                 = 0;
+    Settings.ForceInterleaved2            = false;
+    Settings.ForceInterleaveGD24          = false;
+    Settings.ApplyCheats                  = false;
+    Settings.NoPatch                      = true;
+    Settings.IgnorePatchChecksum          = false;
+    Settings.ForceLoROM                   = false;
+    Settings.ForceHiROM                   = false;
+    Settings.ForcePAL                     = false;
+    Settings.ForceNTSC                    = false;
+    Settings.InitialSnapshotFilename[0]   = '\0';
+    Settings.SoundSync                    = false;
+    Settings.SixteenBitSound              = true;
+    Settings.Stereo                       = true;
+    Settings.ReverseStereo                = false;
+    Settings.SoundPlaybackRate            = 48000;
+    Settings.SoundInputRate               = 31950;
+    Settings.Mute                         = false;
+    Settings.DynamicRateControl           = false;
+    Settings.DynamicRateLimit             = 5;
+    Settings.InterpolationMethod          = 2;
+    Settings.Transparency                 = true;
+    Settings.DisableGraphicWindows        = true;
+    Settings.DisplayTime                  = false;
+    Settings.DisplayFrameRate             = false;
+    Settings.DisplayWatchedAddresses      = false;
+    Settings.DisplayPressedKeys           = false;
+    Settings.DisplayMovieFrame            = false;
+    Settings.AutoDisplayMessages          = true;
+    Settings.InitialInfoStringTimeout     = 120;
+    Settings.BilinearFilter               = false;
+    Settings.BSXBootup                    = false;
+    Settings.TurboMode                    = false;
+    Settings.TurboSkipFrames              = 15;
+    Settings.MovieTruncate                = false;
+    Settings.MovieNotifyIgnored           = false;
+    Settings.WrongMovieStateProtection    = true;
+    Settings.StretchScreenshots           = 1;
+    Settings.SnapshotScreenshots          = true;
+    Settings.DontSaveOopsSnapshot         = false;
+    Settings.AutoSaveDelay                = 0;
+    Settings.MouseMaster                  = false;
+    Settings.SuperScopeMaster             = false;
+    Settings.JustifierMaster              = false;
+    Settings.MacsRifleMaster              = false;
+    Settings.MultiPlayer5Master           = false;
+    Settings.UpAndDown                    = false;
+    Settings.SuperFXClockMultiplier       = 100;
+    Settings.OverclockMode                = 0;
+    Settings.SeparateEchoBuffer           = false;
+    Settings.DisableGameSpecificHacks     = true;
+    Settings.BlockInvalidVRAMAccessMaster = false;
+    Settings.HDMATimingHack               = 100;
+    Settings.MaxSpriteTilesPerLine        = 34;
+
+    unixSettings.JoystickEnabled   = FALSE;
+    unixSettings.ThreadSound       = TRUE;
+    unixSettings.SoundBufferSize   = 100;
+    unixSettings.SoundFragmentSize = 2048;
+    unixSettings.rewindBufferSize  = 0;
+    unixSettings.rewindGranularity = 1;
+    unixSettings.SoundBufferSize   = 100;
+    unixSettings.SoundFragmentSize = 2048;
+
+    s9x_base_dir        = default_dir;
+    snapshot_filename   = NULL;
+    play_smv_filename   = NULL;
+    record_smv_filename = NULL;
+    sound_device        = "default";
+
+    memset(&so, 0, sizeof(so));
+    scpu->Flags = 0;
+    mem->Init();
+
+    S9xParseDisplayConfig(1);
+    S9xInitAPU();
+    S9xInitSound(0);
+    S9xSetSoundMute(TRUE);
+    bool8 loaded = mem->LoadROM(rom_filename);
+
+    mem->LoadSRAM(S9xGetFilename(".srm", SRAM_DIR));
+    Settings.StopEmulation = FALSE;
+    S9xInitDisplay(argc, argv);
+    S9xSetSoundMute(FALSE);
+    while (1) {
+        scpu->S9xMainLoop();
     }
-
-    if (bank >= 0xc0) {
-        return fastMem ? 6 : 8;
-    }
-
-    if (adr < 0x2000) {
-        return 8;
-    }
-
-    if (adr < 0x4000) {
-        return 6;
-    }
-
-    if (adr < 0x4200) {
-        return 12;
-    }
-
-    if (adr < 0x6000) {
-        return 6;
-    }
-
-    if (adr < 0x8000) {
-        return 8;
-    }
-
-    return (fastMem && bank >= 0x80) ? 6 : 8;
+    S9xProcessEvents(FALSE);
 }
-uint8_t Snes::snes_read(uint32_t adr)
+int main(int argc, char **argv)
 {
-    uint8_t val = snes_rread(adr);
-    openBus     = val;
-    return val;
-}
-uint8_t Snes::snes_cpuRead(uint32_t adr)
-{
-    cpuMemOps++;
-    cpuCyclesLeft += snes_getAccessTime(adr);
-    return snes_read(adr);
-}
-void Snes::snes_cpuWrite(uint32_t adr, uint8_t val)
-{
-    cpuMemOps++;
-    cpuCyclesLeft += snes_getAccessTime(adr);
-    snes_write(adr, val);
+    if (argc < 2)
+        exit(1);
+
+    g_snes = new SNESX();
+    g_snes->S9xinit(argc, argv);
 }
