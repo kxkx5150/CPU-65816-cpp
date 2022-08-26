@@ -14,6 +14,10 @@ Ubuntu 22.04
 
 <br>
 
+
+https://user-images.githubusercontent.com/10168979/186939771-d465b839-a3d9-4ed7-98af-ae2375135a8f.mp4
+
+
 <br>
 
 use snes9x-1.61 as a reference
