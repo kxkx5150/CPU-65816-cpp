@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <string>
 #include <numeric>
 #include <assert.h>
@@ -405,7 +406,8 @@ uint32 CMemory::FileLoader(uint8 *buffer, const char *filename, uint32 maxsize)
         default: {
             STREAM fp = OPEN_STREAM(fname, "rb");
             if (!fp)
-                return (0);
+                exit(0);
+
             strcpy(ROMFilename, fname);
             int    len  = 0;
             uint32 size = 0;
