@@ -6,17 +6,18 @@
 
 ### WIP
 
-<br>
+<br><br><br>
+
+Ubuntu 22.04  
+install SDL2
 
 <pre>
-Ubuntu 22.04
+sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-net-dev libsdl2-ttf-dev
 </pre>
 
-<br>
-
+<br><br>
 
 https://user-images.githubusercontent.com/10168979/186939771-d465b839-a3d9-4ed7-98af-ae2375135a8f.mp4
-
 
 <br>
 

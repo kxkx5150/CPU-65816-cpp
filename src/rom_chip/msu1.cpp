@@ -3,12 +3,12 @@
                 This file is licensed under the Snes9x License.
    For further information, consult the LICENSE file in the root directory.
 \*****************************************************************************/
-#include "snes.h"
-#include "mem.h"
+#include "../snes.h"
+#include "../mem.h"
 //#include "display.h"
 #include "msu1.h"
-#include "apu/resampler.h"
-#include "apu/bapu/dsp/blargg_endian.h"
+#include "../apu/resampler.h"
+#include "../apu/blargg_endian.h"
 #include <fstream>
 #include <sys/stat.h>
 STREAM dataStream  = NULL;
@@ -169,39 +169,6 @@ bool S9xMSU1ROMExists(void)
     }
 #endif
     return false;
-}
-void S9xMSU1Generate(size_t sample_count)
-{
-    partial_frames += 4410 * (sample_count / 2);
-    while (partial_frames >= 3204) {
-        if (MSU1.MSU1_STATUS & AudioPlaying && audioStream) {
-            int32  sample;
-            int16 *left       = (int16 *)&sample;
-            int16 *right      = left + 1;
-            int    bytes_read = READ_STREAM((char *)&sample, 4, audioStream);
-            if (bytes_read == 4) {
-                *left  = ((int32)(int16)GET_LE16(left) * MSU1.MSU1_VOLUME / 255);
-                *right = ((int32)(int16)GET_LE16(right) * MSU1.MSU1_VOLUME / 255);
-                msu_resampler->push_sample(*left, *right);
-                MSU1.MSU1_AUDIO_POS += 4;
-                partial_frames -= 3204;
-            } else if (bytes_read >= 0) {
-                if (MSU1.MSU1_STATUS & AudioRepeating) {
-                    MSU1.MSU1_AUDIO_POS = audioLoopPos;
-                    REVERT_STREAM(audioStream, MSU1.MSU1_AUDIO_POS, 0);
-                } else {
-                    MSU1.MSU1_STATUS &= ~(AudioPlaying | AudioRepeating);
-                    REVERT_STREAM(audioStream, 8, 0);
-                }
-            } else {
-                MSU1.MSU1_STATUS &= ~(AudioPlaying | AudioRepeating);
-            }
-        } else {
-            MSU1.MSU1_STATUS &= ~(AudioPlaying | AudioRepeating);
-            partial_frames -= 3204;
-            msu_resampler->push_sample(0, 0);
-        }
-    }
 }
 uint8 S9xMSU1ReadPort(uint8 port)
 {

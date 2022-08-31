@@ -2,6 +2,7 @@
 #define _SNES9X_H_
 #include <alsa/asoundlib.h>
 #include "utils/port.h"
+#include <SDL2/SDL_events.h>
 
 #define VERSION                "1.00"
 #define STREAM                 Stream *
@@ -65,17 +66,14 @@
 #define FRAME_ADVANCE_FLAG   (1 << 9)
 #define AUTO_FRAMERATE       200
 
-
 void        S9xPutImage(int, int);
 void        S9xInitDisplay(int, char **);
 void        S9xDeinitDisplay(void);
 void        S9xTextMode(void);
 void        S9xGraphicsMode(void);
 const char *S9xStringInput(const char *);
-void        S9xProcessEvents(bool8);
 const char *S9xSelectFilename(const char *, const char *, const char *, const char *);
 const char *S9xParseDisplayConfig(int pass);
-
 
 // enum
 enum
@@ -326,7 +324,6 @@ typedef struct
     uint8 _5A22;
 } SnesModel;
 
-
 class SCPUState;
 class CMemory;
 class SDMAS;
@@ -342,6 +339,8 @@ class SNESX {
     Renderer  *renderer = nullptr;
 
   public:
+    uint16_t pad[4] = {};
+
     uint8 OpenBus = 0;
 
     SnesModel  M1SNES = {1, 3, 2};
@@ -369,6 +368,8 @@ class SNESX {
     bool8       S9xInitUpdate(void);
     const char *S9xGetFilename(const char *ex, enum s9x_getdirtype dirtype);
     const char *S9xGetDirectory(enum s9x_getdirtype dirtype);
+
+    void S9xkeyDownUp(SDL_Event event);
 
   public:
 };

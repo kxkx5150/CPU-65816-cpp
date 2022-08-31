@@ -12,9 +12,9 @@
 struct SGFX
 {
     typedef void (*Callback)(void *);
-    const uint32 Pitch      = sizeof(uint16) * MAX_SNES_WIDTH;
+    uint32       Pitch      = sizeof(uint16) * MAX_SNES_WIDTH;
     const uint32 RealPPL    = MAX_SNES_WIDTH;
-    const uint32 ScreenSize = MAX_SNES_WIDTH * MAX_SNES_HEIGHT;
+    uint32       ScreenSize = MAX_SNES_WIDTH * MAX_SNES_HEIGHT;
     uint16       ScreenBuffer[MAX_SNES_WIDTH * (MAX_SNES_HEIGHT + 64)];
 
     uint16 *Screen;

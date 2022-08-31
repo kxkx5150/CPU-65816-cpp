@@ -7,7 +7,8 @@ OS         = `uname -s -r -m|sed \"s/ /-/g\"|tr \"[A-Z]\" \"[a-z]\"|tr \"/()\" \
 BUILDDIR   = .
 
 ROMCHIPS   = src/rom_chip/stream.o src/rom_chip/msu1.o
-OBJECTS    = src/apu/apu.o src/apu/bapu/dsp/sdsp.o src/apu/bapu/smp/smp.o src/renderer.o src/apu/bapu/smp/smp_state.o src/cpu.o src/dma.o src/mem.o src/ppu.o src/snes.o src/tile.o src/utils/compat.o src/x11.o
+OBJECTS    = src/renderer.o src/cpu.o src/dma.o src/mem.o src/ppu.o src/snes.o src/tile.o src/utils/compat.o src/gui.o \
+src/apu/apu.o src/apu/SNES_SPC_misc.o src/apu/SNES_SPC_state.o src/apu/SNES_SPC.o src/apu/SPC_DSP.o src/apu/SPC_Filter.o
 
 DEFS       = -DMITSHM
 
@@ -15,15 +16,16 @@ DEFS       = -DMITSHM
 CCC        = g++
 CC         = gcc
 GASM       = g++
-INCLUDES   += -I. -I.. -Isrc/apu/ -Isrc/apu/bapu -Isrc/
+INCLUDES   += -I. -I.. -Isrc/apu/ -Isrc/
 
-CCFLAGS    = -g -O0 -fomit-frame-pointer -fno-exceptions -fno-rtti -pedantic -Wall -W -Wno-unused-parameter -DHAVE_MKSTEMP -DHAVE_STRINGS_H -DHAVE_SYS_IOCTL_H -DHAVE_STDINT_H -DRIGHTSHIFT_IS_SAR -DUSE_XVIDEO -DUSE_XINERAMA -DALSA $(DEFS)
+OPT        = -O0
+CCFLAGS    = -std=c++11 -g $(OPT) -fomit-frame-pointer -fno-exceptions -fno-rtti -pedantic -W -Wno-unused-parameter -DHAVE_STRINGS_H -DHAVE_STDINT_H $(DEFS)
 CFLAGS     = $(CCFLAGS)
 
 .SUFFIXES: .o .cpp .c .cc .h .m .i .s .obj
 
 snes: $(OBJECTS) $(ROMCHIPS)
-	$(CCC) $(LDFLAGS) $(INCLUDES) -o $@ $(OBJECTS) $(ROMCHIPS) -lm -lz -lSM -lICE -lX11 -lXext -lXv -lXinerama -lpthread -lasound
+	$(CCC) $(LDFLAGS) $(INCLUDES) -o $@ $(OBJECTS) $(ROMCHIPS) -lm -lz -lICE -lpthread -lpng -lSDL2
 
 
 .cpp.o:

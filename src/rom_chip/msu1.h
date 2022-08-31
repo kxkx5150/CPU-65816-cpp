@@ -50,7 +50,6 @@ void   S9xMSU1DeInit(void);
 bool   S9xMSU1ROMExists(void);
 STREAM S9xMSU1OpenFile(const char *msu_ext, bool skip_unpacked = FALSE);
 void   S9xMSU1Init(void);
-void   S9xMSU1Generate(size_t sample_count);
 uint8  S9xMSU1ReadPort(uint8 port);
 void   S9xMSU1WritePort(uint8 port, uint8 byte);
 size_t S9xMSU1Samples(void);

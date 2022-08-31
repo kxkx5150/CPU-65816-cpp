@@ -10,10 +10,10 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <SDL2/SDL.h>
 
 #include "snes.h"
 #include "cpu.h"
-#include "apu/apu.h"
 #include "snes.h"
 #include "mem.h"
 #include "dma.h"
@@ -35,7 +35,8 @@ struct SSNESGameFixes SNESGameFixes;
 struct SUnixSettings  unixSettings;
 struct SoundStatus    so;
 SNESX                *g_snes = nullptr;
-
+SDL_AudioSpec        *audiospec;
+uint32                sound_buffer_size = 100;
 
 SNESX::SNESX()
 {
@@ -170,131 +171,52 @@ void SNESX::S9xSyncSpeed(void)
 }
 void SNESX::S9xSamplesAvailable(void *data)
 {
-    int               samples_to_write;
-    static uint8     *sound_buffer      = NULL;
-    static int        sound_buffer_size = 0;
-    snd_pcm_sframes_t frames_written, frames;
-    frames = snd_pcm_avail(so.pcm_handle);
-    if (frames < 0) {
-        frames = snd_pcm_recover(so.pcm_handle, frames, 1);
-        return;
-    }
-    if (Settings.DynamicRateControl) {
-        S9xUpdateDynamicRate(snd_pcm_frames_to_bytes(so.pcm_handle, frames), so.output_buffer_size);
-    }
-    samples_to_write = S9xGetSampleCount();
-    if (samples_to_write < 0)
-        return;
-    if (Settings.DynamicRateControl && !Settings.SoundSync) {
-        if (frames < samples_to_write / 2) {
-            S9xClearSamples();
-            return;
-        }
-    }
-    if (Settings.SoundSync && !Settings.TurboMode && !Settings.Mute) {
-        snd_pcm_nonblock(so.pcm_handle, 0);
-        frames = samples_to_write / 2;
-    } else {
-        snd_pcm_nonblock(so.pcm_handle, 1);
-        frames = MIN(frames, samples_to_write / 2);
-    }
-    int bytes = snd_pcm_frames_to_bytes(so.pcm_handle, frames);
-    if (bytes <= 0)
-        return;
-    if (sound_buffer_size < bytes || sound_buffer == NULL) {
-        sound_buffer      = (uint8 *)realloc(sound_buffer, bytes);
-        sound_buffer_size = bytes;
-    }
-    S9xMixSamples(sound_buffer, frames * 2);
-    frames_written = 0;
-    while (frames_written < frames) {
-        int result;
-        result = snd_pcm_writei(so.pcm_handle, sound_buffer + snd_pcm_frames_to_bytes(so.pcm_handle, frames_written),
-                                frames - frames_written);
-        if (result < 0) {
-            result = snd_pcm_recover(so.pcm_handle, result, 1);
-            if (result < 0) {
-                break;
-            }
-        } else {
-            frames_written += result;
-        }
-    }
+}
+static void sdl_audio_callback(void *userdata, Uint8 *stream, int len)
+{
+    SDL_LockAudio();
+    S9xMixSamples(stream, len >> (Settings.SixteenBitSound ? 1 : 0));
+    SDL_UnlockAudio();
+    return;
+}
+static void samples_available(void *data)
+{
+    SDL_LockAudio();
+    S9xFinalizeSamples();
+    SDL_UnlockAudio();
+
+    return;
 }
 bool8 SNESX::S9xOpenSoundDevice(void)
 {
-    int                  err;
-    unsigned int         periods     = 8;
-    unsigned int         buffer_size = unixSettings.SoundBufferSize * 1000;
-    snd_pcm_sw_params_t *sw_params;
-    snd_pcm_hw_params_t *hw_params;
-    snd_pcm_uframes_t    alsa_buffer_size, alsa_period_size;
-    unsigned int         min  = 0;
-    unsigned int         max  = 0;
-    unsigned int         rate = Settings.SoundPlaybackRate;
-    err                       = snd_pcm_open(&so.pcm_handle, sound_device, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
-    if (err < 0) {
-        printf("Failed: %s\n", snd_strerror(err));
-        return (FALSE);
+    SDL_InitSubSystem(SDL_INIT_AUDIO);
+
+    audiospec = (SDL_AudioSpec *)malloc(sizeof(SDL_AudioSpec));
+
+    audiospec->freq     = Settings.SoundPlaybackRate;
+    audiospec->channels = Settings.Stereo ? 2 : 1;
+    audiospec->format   = Settings.SixteenBitSound ? AUDIO_S16SYS : AUDIO_U8;
+    audiospec->samples  = (sound_buffer_size * audiospec->freq / 1000) >> 1;
+    audiospec->callback = sdl_audio_callback;
+
+    printf("SDL sound driver initializing...\n");
+    printf("    --> (Frequency: %dhz, Latency: %dms)...", audiospec->freq,
+           (audiospec->samples * 1000 / audiospec->freq) << 1);
+
+    if (SDL_OpenAudio(audiospec, NULL) < 0) {
+        printf("Failed\n");
+
+        free(audiospec);
+        audiospec = NULL;
+
+        return FALSE;
     }
-    snd_pcm_hw_params_alloca(&hw_params);
-    snd_pcm_hw_params_any(so.pcm_handle, hw_params);
-    snd_pcm_hw_params_set_format(so.pcm_handle, hw_params, SND_PCM_FORMAT_S16);
-    snd_pcm_hw_params_set_access(so.pcm_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_rate_resample(so.pcm_handle, hw_params, 0);
-    snd_pcm_hw_params_set_channels(so.pcm_handle, hw_params, 2);
-    snd_pcm_hw_params_get_rate_min(hw_params, &min, NULL);
-    snd_pcm_hw_params_get_rate_max(hw_params, &max, NULL);
-    fprintf(stderr, "Alsa available rates: %d to %d\n", min, max);
-    if (rate > max && rate < min) {
-        fprintf(stderr, "Rate %d not available. Using %d instead.\n", rate, max);
-        rate = max;
-    }
-    snd_pcm_hw_params_set_rate_near(so.pcm_handle, hw_params, &rate, NULL);
-    snd_pcm_hw_params_get_buffer_time_min(hw_params, &min, NULL);
-    snd_pcm_hw_params_get_buffer_time_max(hw_params, &max, NULL);
-    fprintf(stderr, "Alsa available buffer sizes: %dms to %dms\n", min / 1000, max / 1000);
-    if (buffer_size < min && buffer_size > max) {
-        fprintf(stderr, "Buffer size %dms not available. Using %d instead.\n", buffer_size / 1000, (min + max) / 2000);
-        buffer_size = (min + max) / 2;
-    }
-    snd_pcm_hw_params_set_buffer_time_near(so.pcm_handle, hw_params, &buffer_size, NULL);
-    snd_pcm_hw_params_get_periods_min(hw_params, &min, NULL);
-    snd_pcm_hw_params_get_periods_max(hw_params, &max, NULL);
-    fprintf(stderr, "Alsa period ranges: %d to %d blocks\n", min, max);
-    if (periods > max)
-        periods = max;
-    snd_pcm_hw_params_set_periods_near(so.pcm_handle, hw_params, &periods, NULL);
-    err = snd_pcm_hw_params(so.pcm_handle, hw_params);
-    if (err < 0) {
-        fprintf(stderr, "Alsa error: unable to install hw params\n");
-        snd_pcm_drain(so.pcm_handle);
-        snd_pcm_close(so.pcm_handle);
-        so.pcm_handle = NULL;
-        return (FALSE);
-    }
-    snd_pcm_sw_params_alloca(&sw_params);
-    snd_pcm_sw_params_current(so.pcm_handle, sw_params);
-    snd_pcm_get_params(so.pcm_handle, &alsa_buffer_size, &alsa_period_size);
-    snd_pcm_sw_params_set_start_threshold(so.pcm_handle, sw_params, (alsa_buffer_size / 2));
-    err = snd_pcm_sw_params(so.pcm_handle, sw_params);
-    if (err < 0) {
-        fprintf(stderr, "Alsa error: unable to install sw params\n");
-        snd_pcm_drain(so.pcm_handle);
-        snd_pcm_close(so.pcm_handle);
-        so.pcm_handle = NULL;
-        return (FALSE);
-    }
-    err = snd_pcm_prepare(so.pcm_handle);
-    if (err < 0) {
-        fprintf(stderr, "Alsa error: unable to prepare audio: %s\n", snd_strerror(err));
-        snd_pcm_drain(so.pcm_handle);
-        snd_pcm_close(so.pcm_handle);
-        so.pcm_handle = NULL;
-        return (FALSE);
-    }
-    so.output_buffer_size = snd_pcm_frames_to_bytes(so.pcm_handle, alsa_buffer_size);
-    S9xSetSamplesAvailableCallback(S9xCB, NULL);
+
+    printf("OK\n");
+
+    SDL_PauseAudio(0);
+
+    S9xSetSamplesAvailableCallback(samples_available, NULL);
     return (TRUE);
 }
 void SNESX::S9xExit(void)
@@ -306,6 +228,63 @@ void SNESX::S9xExit(void)
     mem->Deinit();
     S9xDeinitAPU();
     exit(0);
+}
+void SNESX::S9xkeyDownUp(SDL_Event event)
+{
+    switch (event.type) {
+        case SDL_KEYDOWN:
+            if (SDLK_x)
+                pad[0] |= 0x8000;
+            if (SDLK_z)
+                pad[0] |= 0x4000;
+            if (SDLK_SPACE)
+                pad[0] |= 0x2000;
+            if (SDLK_RETURN)
+                pad[0] |= 0x1000;
+            if (SDLK_UP)
+                pad[0] |= 0x0800;
+            if (SDLK_DOWN)
+                pad[0] |= 0x0400;
+            if (SDLK_LEFT)
+                pad[0] |= 0x0200;
+            if (SDLK_RIGHT)
+                pad[0] |= 0x0100;
+            if (SDLK_s)
+                pad[0] |= 0x0080;
+            if (SDLK_a)
+                pad[0] |= 0x0040;
+            if (SDLK_q)
+                pad[0] |= 0x0020;
+            if (SDLK_w)
+                pad[0] |= 0x0010;
+            break;
+        case SDL_KEYUP:
+            if (SDLK_x)
+                pad[0] &= ~0x8000;
+            if (SDLK_z)
+                pad[0] &= ~0x4000;
+            if (SDLK_SPACE)
+                pad[0] &= ~0x2000;
+            if (SDLK_RETURN)
+                pad[0] &= ~0x1000;
+            if (SDLK_UP)
+                pad[0] &= ~0x0800;
+            if (SDLK_DOWN)
+                pad[0] &= ~0x0400;
+            if (SDLK_LEFT)
+                pad[0] &= ~0x0200;
+            if (SDLK_RIGHT)
+                pad[0] &= ~0x0100;
+            if (SDLK_s)
+                pad[0] &= ~0x0080;
+            if (SDLK_a)
+                pad[0] &= ~0x0040;
+            if (SDLK_q)
+                pad[0] &= ~0x0020;
+            if (SDLK_w)
+                pad[0] &= ~0x0010;
+            break;
+    }
 }
 void SNESX::S9xinit(int argc, char **argv)
 {
@@ -412,7 +391,7 @@ void SNESX::S9xinit(int argc, char **argv)
 
     S9xParseDisplayConfig(1);
     S9xInitAPU();
-    S9xInitSound(0);
+    S9xInitSound(sound_buffer_size, 0);
     S9xSetSoundMute(TRUE);
     bool8 loaded = mem->LoadROM(rom_filename);
 
@@ -420,10 +399,35 @@ void SNESX::S9xinit(int argc, char **argv)
     Settings.StopEmulation = FALSE;
     S9xInitDisplay(argc, argv);
     S9xSetSoundMute(FALSE);
+
+    SDL_Event event;
+    bool8     quit_state = FALSE;
+
     while (1) {
         scpu->S9xMainLoop();
+
+        while (SDL_PollEvent(&event) != 0) {
+            switch (event.type) {
+                case SDL_QUIT:
+                    quit_state = TRUE;
+                    break;
+                case SDL_KEYDOWN:
+                    S9xkeyDownUp(event);
+                    break;
+
+                case SDL_KEYUP:
+                    S9xkeyDownUp(event);
+                    break;
+
+                default: {
+                    break;
+                }
+            }
+        }
+        if (quit_state == TRUE) {
+            g_snes->S9xExit();
+        }
     }
-    S9xProcessEvents(FALSE);
 }
 int main(int argc, char **argv)
 {
